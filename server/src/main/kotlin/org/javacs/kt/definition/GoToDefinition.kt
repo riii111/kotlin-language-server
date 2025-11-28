@@ -23,7 +23,7 @@ import java.io.File
 import java.nio.file.Paths
 
 private val cachedTempFiles = mutableMapOf<KlsURI, Path>()
-private val definitionPattern = Regex("(?:class|interface|object|fun)\\s+(\\w+)")
+private val definitionPattern = Regex("(?:class|interface|object|fun|val|var)\\s+(\\w+)")
 
 fun goToDefinition(
     file: CompiledFile,
