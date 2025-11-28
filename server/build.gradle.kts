@@ -18,7 +18,13 @@ val applicationName = "kotlin-language-server"
 application {
     mainClass.set(serverMainClassName)
     description = "Code completions, diagnostics and more for Kotlin"
-    applicationDefaultJvmArgs = listOf("-DkotlinLanguageServer.version=$version")
+    applicationDefaultJvmArgs = listOf(
+        "-DkotlinLanguageServer.version=$version",
+        "-Xms256m",
+        "-Xmx2048m",  // Limit heap to 2GB to prevent memory bloat (supports large projects)
+        "-XX:+UseG1GC",
+        "-XX:+UseStringDeduplication"
+    )
     applicationDistribution.into("bin") { filePermissions { unix("755".toInt(radix = 8)) } }
 }
 
