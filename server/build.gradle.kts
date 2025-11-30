@@ -21,7 +21,7 @@ application {
     applicationDefaultJvmArgs = listOf(
         "-DkotlinLanguageServer.version=$version",
         "-Xms256m",
-        "-Xmx2048m",  // Limit heap to 2GB to prevent memory bloat (supports large projects)
+        "-Xmx3072m",  // 3GB heap required for large projects to avoid OOM during compilation
         "-XX:+UseG1GC",
         "-XX:+UseStringDeduplication"
     )
