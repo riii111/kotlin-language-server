@@ -5,13 +5,15 @@ import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.javacs.kt.CompiledFile
 import org.javacs.kt.codeaction.quickfix.ImplementAbstractMembersQuickFix
 import org.javacs.kt.codeaction.quickfix.AddMissingImportsQuickFix
+import org.javacs.kt.codeaction.quickfix.RemoveUselessCastQuickFix
 import org.javacs.kt.command.JAVA_TO_KOTLIN_COMMAND
 import org.javacs.kt.util.toPath
 import org.javacs.kt.index.SymbolIndex
 
 val QUICK_FIXES = listOf(
     ImplementAbstractMembersQuickFix(),
-    AddMissingImportsQuickFix()
+    AddMissingImportsQuickFix(),
+    RemoveUselessCastQuickFix()
 )
 
 fun codeActions(file: CompiledFile, index: SymbolIndex, range: Range, context: CodeActionContext): List<Either<Command, CodeAction>> {
@@ -43,7 +45,5 @@ fun getRefactors(file: CompiledFile, range: Range): List<Either<Command, CodeAct
 }
 
 fun getQuickFixes(file: CompiledFile, index: SymbolIndex, range: Range, diagnostics: List<Diagnostic>): List<Either<Command, CodeAction>> {
-    return QUICK_FIXES.flatMap {
-        it.compute(file, index, range, diagnostics)
-    }
+    return QUICK_FIXES.flatMap { it.compute(file, index, range, diagnostics) }
 }
