@@ -16,8 +16,11 @@ interface QuickFix {
     fun compute(file: CompiledFile, index: SymbolIndex, range: Range, diagnostics: List<Diagnostic>): List<Either<Command, CodeAction>>
 }
 
-fun diagnosticMatch(diagnostic: Diagnostic, range: Range, diagnosticTypes: Set<String>): Boolean =
-    range.isSubrangeOf(diagnostic.range) && diagnosticTypes.contains(diagnostic.code.left)
+fun diagnosticMatch(diagnostic: Diagnostic, range: Range, diagnosticTypes: Set<String>): Boolean {
+    val diagRange = diagnostic.range ?: return false
+    val code = diagnostic.code?.left ?: return false
+    return range.isSubrangeOf(diagRange) && diagnosticTypes.contains(code)
+}
 
 fun diagnosticMatch(diagnostic: KotlinDiagnostic, startCursor: Int, endCursor: Int, diagnosticTypes: Set<String>): Boolean =
     diagnostic.textRanges.any { it.startOffset <= startCursor && it.endOffset >= endCursor } && diagnosticTypes.contains(diagnostic.factory.name)
