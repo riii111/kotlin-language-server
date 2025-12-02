@@ -37,7 +37,7 @@ class AddMissingImportsQuickFix: QuickFix {
 
     private fun getUnresolvedReferencesFromDiagnostics(diagnostics: List<Diagnostic>): List<Diagnostic> =
         diagnostics.filter {
-            "UNRESOLVED_REFERENCE" == it.code.left.trim()
+            it.code?.left?.trim() == "UNRESOLVED_REFERENCE"
         }
 
     private fun getImportAlternatives(symbolName: String, file: KtFile, index: SymbolIndex): List<Pair<String, TextEdit>> {
