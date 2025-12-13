@@ -16,7 +16,6 @@ import org.jetbrains.kotlin.descriptors.ClassConstructorDescriptor
 import org.jetbrains.kotlin.descriptors.ConstructorDescriptor
 import org.jetbrains.kotlin.descriptors.DeclarationDescriptor
 import org.jetbrains.kotlin.descriptors.FunctionDescriptor
-import org.jetbrains.kotlin.resolve.OverridingUtil
 import org.jetbrains.kotlin.js.resolve.diagnostics.findPsi
 import org.jetbrains.kotlin.lexer.KtSingleValueToken
 import org.jetbrains.kotlin.lexer.KtTokens
@@ -64,7 +63,7 @@ private fun doFindReferences(element: KtNamedDeclaration, sp: SourcePath): Colle
         else -> findNameReferences(element, recompile)
     }
 
-    val overrideReferences = findOverrideRelatedReferences(declaration, element, recompile, sp)
+    val overrideReferences = findOverrideRelatedReferences(declaration, element, recompile, possibleReferences(declaration, sp))
 
     return baseReferences + overrideReferences
 }
@@ -73,20 +72,20 @@ private fun findOverrideRelatedReferences(
     declaration: DeclarationDescriptor,
     element: KtNamedDeclaration,
     recompile: BindingContext,
-    sp: SourcePath
+    compiledFiles: Set<KtFile>
 ): Collection<KtElement> {
     if (declaration !is CallableMemberDescriptor) return emptyList()
 
     val results = mutableListOf<KtElement>()
 
-    for (file in sp.all()) {
+    for (file in compiledFiles) {
         val overridingFunctions = file.preOrderTraversal()
             .filterIsInstance<KtNamedFunction>()
-            .filter { it.hasModifier(org.jetbrains.kotlin.lexer.KtTokens.OVERRIDE_KEYWORD) && it.name == element.name }
+            .filter { it.hasModifier(KtTokens.OVERRIDE_KEYWORD) && it.name == element.name }
 
         for (func in overridingFunctions) {
             val funcDescriptor = recompile[BindingContext.DECLARATION_TO_DESCRIPTOR, func] as? CallableMemberDescriptor
-            if (funcDescriptor != null && funcDescriptor.overriddenDescriptors.any { it.findPsi() == element }) {
+            if (funcDescriptor != null && funcDescriptor.overriddenDescriptors.any { matchesOverriddenDescriptor(it, element) }) {
                 results.add(func)
             }
         }
@@ -98,6 +97,23 @@ private fun findOverrideRelatedReferences(
     }
 
     return results
+}
+
+private fun matchesOverriddenDescriptor(descriptor: CallableMemberDescriptor, target: KtNamedDeclaration): Boolean {
+    val visited = mutableSetOf<CallableMemberDescriptor>()
+    val queue = ArrayDeque<CallableMemberDescriptor>()
+    queue.add(descriptor)
+
+    while (queue.isNotEmpty()) {
+        val current = queue.removeFirst()
+        if (current in visited) continue
+        visited.add(current)
+
+        if (current.findPsi() == target) return true
+        queue.addAll(current.overriddenDescriptors)
+    }
+
+    return false
 }
 
 /**
@@ -258,14 +274,8 @@ private fun matchesReference(found: DeclarationDescriptor, search: KtNamedDeclar
 
     if (found is CallableMemberDescriptor) {
         for (overridden in found.overriddenDescriptors) {
-            if (overridden.findPsi() == search)
+            if (matchesOverriddenDescriptor(overridden, search))
                 return true
-            if (overridden is CallableMemberDescriptor) {
-                for (transitiveOverridden in overridden.overriddenDescriptors) {
-                    if (transitiveOverridden.findPsi() == search)
-                        return true
-                }
-            }
         }
     }
 
