@@ -225,3 +225,50 @@ class ReferenceOperatorUsingNameTest : SingleFileTestFixture("references", "Refe
         assertThat(uris, hasItem(containsString(file)))
     }
 }
+
+class ReferenceInterfaceTest : SingleFileTestFixture("references", "ReferenceInterface.kt") {
+    // LSP uses 0-indexed line numbers in responses
+
+    @Test fun `find references to interface abstract method`() {
+        // Searching from interface abstract method (line 2)
+        val request = referenceParams(file, 2, 8)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+        val uris = references?.map { it.uri }
+
+        assertThat("References should not be empty", references, not(empty()))
+        assertThat(uris, hasItem(containsString(file)))
+        assertThat("Finds interface method call", referenceStrs, hasItem(containsString("line = 14")))
+    }
+
+    @Test fun `find references to interface method includes override implementations`() {
+        // Searching from interface abstract method (line 2)
+        val request = referenceParams(file, 2, 8)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+
+        assertThat("Finds TokenIssuerImpl override", referenceStrs, hasItem(containsString("line = 5")))
+        assertThat("Finds FakeTokenIssuer override", referenceStrs, hasItem(containsString("line = 9")))
+    }
+
+    @Test fun `find references to override method`() {
+        // Searching from override implementation (line 6)
+        val request = referenceParams(file, 6, 18)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+        val uris = references?.map { it.uri }
+
+        assertThat("References should not be empty", references, not(empty()))
+        assertThat(uris, hasItem(containsString(file)))
+        assertThat("Finds direct method call", referenceStrs, hasItem(containsString("line = 19")))
+    }
+
+    @Test fun `find references to override method includes interface calls`() {
+        // Searching from override implementation (line 6)
+        val request = referenceParams(file, 6, 18)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+
+        assertThat("Finds interface method call", referenceStrs, hasItem(containsString("line = 14")))
+    }
+}
