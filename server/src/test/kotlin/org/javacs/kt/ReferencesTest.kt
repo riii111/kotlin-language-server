@@ -225,3 +225,56 @@ class ReferenceOperatorUsingNameTest : SingleFileTestFixture("references", "Refe
         assertThat(uris, hasItem(containsString(file)))
     }
 }
+
+class ReferenceInterfaceTest : SingleFileTestFixture("references", "ReferenceInterface.kt") {
+    // Note: LSP uses 0-indexed line numbers in responses
+
+    @Test fun `find references to interface abstract method`() {
+        // file line 2: fun generateToken(): String (interface abstract method)
+        val request = referenceParams(file, 2, 8)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+        val uris = references?.map { it.uri }
+
+        assertThat("References should not be empty", references, not(empty()))
+        assertThat(uris, hasItem(containsString(file)))
+        // Should find call via interface: issuer.generateToken() at file line 15 (LSP line 14)
+        assertThat("Finds interface method call", referenceStrs, hasItem(containsString("line = 14")))
+    }
+
+    @Test fun `find references to interface method includes override implementations`() {
+        // file line 2: fun generateToken(): String (interface abstract method)
+        val request = referenceParams(file, 2, 8)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+
+        // IntelliJ-like behavior: override implementations should also be found
+        // file line 6 -> LSP line 5, file line 10 -> LSP line 9
+        assertThat("Finds TokenIssuerImpl override", referenceStrs, hasItem(containsString("line = 5")))
+        assertThat("Finds FakeTokenIssuer override", referenceStrs, hasItem(containsString("line = 9")))
+    }
+
+    @Test fun `find references to override method`() {
+        // file line 6: override fun generateToken(): String = "token" (TokenIssuerImpl)
+        val request = referenceParams(file, 6, 18)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+        val uris = references?.map { it.uri }
+
+        assertThat("References should not be empty", references, not(empty()))
+        assertThat(uris, hasItem(containsString(file)))
+        // Should find direct call: impl.generateToken() at file line 20 (LSP line 19)
+        assertThat("Finds direct method call", referenceStrs, hasItem(containsString("line = 19")))
+    }
+
+    @Test fun `find references to override method includes interface calls`() {
+        // file line 6: override fun generateToken(): String = "token" (TokenIssuerImpl)
+        val request = referenceParams(file, 6, 18)
+        val references = languageServer.textDocumentService.references(request).get()
+        val referenceStrs = references?.map { it.toString() }
+
+        // IntelliJ-like behavior: calls via interface should also be found (polymorphism)
+        // file line 15 -> LSP line 14
+        assertThat("Finds interface method call", referenceStrs, hasItem(containsString("line = 14")))
+    }
+}
