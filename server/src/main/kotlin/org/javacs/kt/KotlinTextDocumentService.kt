@@ -380,6 +380,11 @@ class KotlinTextDocumentService(
     }
 
     private fun doLint(cancelCallback: () -> Boolean) {
+        if (!cp.isReady) {
+            LOG.info("Skipping lint - classpath not ready")
+            return
+        }
+
         LOG.info("Linting {}", describeURIs(lintTodo))
         val files = clearLint()
         val context = sp.compileFiles(files)
