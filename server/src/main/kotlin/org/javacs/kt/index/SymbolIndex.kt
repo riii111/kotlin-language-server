@@ -187,6 +187,7 @@ class SymbolIndex(
 
         currentRefreshTask = progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
+                val exclusionNames = exclusions.mapNotNull { it.name }.toSet()
                 val packages = collectAllPackages(module)
                 LOG.info("Found ${packages.size} packages to index")
 
@@ -242,7 +243,7 @@ class SymbolIndex(
                                 try {
                                     val descriptors = pkg.memberScope.getContributedDescriptors(
                                         DescriptorKindFilter.ALL
-                                    ) { name -> !exclusions.any { declaration -> declaration.name == name } }
+                                    ) { name -> name !in exclusionNames }
                                     addDeclarations(descriptors.asSequence())
                                 } catch (e: IllegalStateException) {
                                     LOG.warn("Could not query descriptors in package $pkgName")
