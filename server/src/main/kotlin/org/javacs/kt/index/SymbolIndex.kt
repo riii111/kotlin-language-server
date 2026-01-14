@@ -14,6 +14,9 @@ import org.jetbrains.exposed.dao.IntEntityClass
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.*
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.withLock
 import kotlin.sequences.Sequence
 
 private const val MAX_FQNAME_LENGTH = 255
@@ -86,11 +89,14 @@ class SymbolIndex(
 ) {
     private companion object {
         const val PROGRESS_UPDATE_INTERVAL_MS = 100L
+        const val INDEX_QUERY_TIMEOUT_MS = 100L
     }
 
     private val db: Database by lazy {
         databaseService.db ?: Database.connect("jdbc:h2:mem:symbolindex;DB_CLOSE_DELAY=-1", "org.h2.Driver")
     }
+
+    private val indexLock = ReentrantReadWriteLock()
 
     var progressFactory: Progress.Factory = Progress.Factory.None
 
@@ -111,38 +117,40 @@ class SymbolIndex(
                 val packages = collectAllPackages(module)
                 LOG.info("Found ${packages.size} packages to index")
 
-                transaction(db) {
-                    // Remove everything first.
-                    Symbols.deleteAll()
+                indexLock.writeLock().withLock {
+                    transaction(db) {
+                        // Remove everything first.
+                        Symbols.deleteAll()
 
-                    // Phase 2: Process packages with progress updates
-                    var lastUpdateTime = System.currentTimeMillis()
+                        // Phase 2: Process packages with progress updates
+                        var lastUpdateTime = System.currentTimeMillis()
 
-                    packages.forEachIndexed { index, pkgName ->
-                        // Throttled progress update
-                        val now = System.currentTimeMillis()
-                        if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
-                            val percent = ((index + 1) * 100) / packages.size
-                            val shortName = pkgName.shortName().asString().takeIf { it.isNotEmpty() } ?: "root"
-                            progress.update(message = shortName, percent = percent)
-                            lastUpdateTime = now
+                        packages.forEachIndexed { index, pkgName ->
+                            // Throttled progress update
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
+                                val percent = ((index + 1) * 100) / packages.size
+                                val shortName = pkgName.shortName().asString().takeIf { it.isNotEmpty() } ?: "root"
+                                progress.update(message = shortName, percent = percent)
+                                lastUpdateTime = now
+                            }
+
+                            // Index descriptors from this package
+                            val pkg = module.getPackage(pkgName)
+                            try {
+                                val descriptors = pkg.memberScope.getContributedDescriptors(
+                                    DescriptorKindFilter.ALL
+                                ) { name -> !exclusions.any { declaration -> declaration.name == name } }
+                                addDeclarations(descriptors.asSequence())
+                            } catch (e: IllegalStateException) {
+                                LOG.warn("Could not query descriptors in package $pkgName")
+                            }
                         }
 
-                        // Index descriptors from this package
-                        val pkg = module.getPackage(pkgName)
-                        try {
-                            val descriptors = pkg.memberScope.getContributedDescriptors(
-                                DescriptorKindFilter.ALL
-                            ) { name -> !exclusions.any { declaration -> declaration.name == name } }
-                            addDeclarations(descriptors.asSequence())
-                        } catch (e: IllegalStateException) {
-                            LOG.warn("Could not query descriptors in package $pkgName")
-                        }
+                        val finished = System.currentTimeMillis()
+                        val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
+                        LOG.info("Updated full symbol index in ${finished - started} ms! (${count} symbol(s))")
                     }
-
-                    val finished = System.currentTimeMillis()
-                    val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
-                    LOG.info("Updated full symbol index in ${finished - started} ms! (${count} symbol(s))")
                 }
             } catch (e: Exception) {
                 LOG.error("Error while updating symbol index")
@@ -159,13 +167,15 @@ class SymbolIndex(
         LOG.info("Updating symbol index...")
 
         try {
-            transaction(db) {
-                removeDeclarations(remove)
-                addDeclarations(add)
+            indexLock.writeLock().withLock {
+                transaction(db) {
+                    removeDeclarations(remove)
+                    addDeclarations(add)
 
-                val finished = System.currentTimeMillis()
-                val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
-                LOG.info("Updated symbol index in ${finished - started} ms! (${count} symbol(s))")
+                    val finished = System.currentTimeMillis()
+                    val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
+                    LOG.info("Updated symbol index in ${finished - started} ms! (${count} symbol(s))")
+                }
             }
         } catch (e: Exception) {
             LOG.error("Error while updating symbol index")
@@ -214,18 +224,29 @@ class SymbolIndex(
         fqName.toString().length <= MAX_FQNAME_LENGTH
             && fqName.shortName().toString().length <= MAX_SHORT_NAME_LENGTH
 
-    fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%"): List<Symbol> = transaction(db) {
-        // TODO: Extension completion currently only works if the receiver matches exactly,
-        //       ideally this should work with subtypes as well
-        SymbolEntity.find {
-            (Symbols.shortName like "$prefix$suffix") and (Symbols.extensionReceiverType eq receiverType?.toString())
-        }.limit(limit)
-            .map { Symbol(
-                fqName = FqName(it.fqName),
-                kind = Symbol.Kind.fromRaw(it.kind),
-                visibility = Symbol.Visibility.fromRaw(it.visibility),
-                extensionReceiverType = it.extensionReceiverType?.let(::FqName)
-            ) }
+    fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%"): List<Symbol> {
+        val readLock = indexLock.readLock()
+        if (!readLock.tryLock(INDEX_QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            LOG.warn("Index query timed out while waiting for lock, returning empty result (graceful degradation)")
+            return emptyList()
+        }
+        try {
+            return transaction(db) {
+                // TODO: Extension completion currently only works if the receiver matches exactly,
+                //       ideally this should work with subtypes as well
+                SymbolEntity.find {
+                    (Symbols.shortName like "$prefix$suffix") and (Symbols.extensionReceiverType eq receiverType?.toString())
+                }.limit(limit)
+                    .map { Symbol(
+                        fqName = FqName(it.fqName),
+                        kind = Symbol.Kind.fromRaw(it.kind),
+                        visibility = Symbol.Visibility.fromRaw(it.visibility),
+                        extensionReceiverType = it.extensionReceiverType?.let(::FqName)
+                    ) }
+            }
+        } finally {
+            readLock.unlock()
+        }
     }
 
     /** Collects all packages into a list for counting and progress tracking. */
