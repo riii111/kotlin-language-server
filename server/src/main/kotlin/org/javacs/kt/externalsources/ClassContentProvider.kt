@@ -25,7 +25,7 @@ class ClassContentProvider(
 ) {
     /** Maps recently used (source-)KLS-URIs to their source contents (e.g. decompiled code) and the file extension. */
     private val cachedContents = object : LinkedHashMap<String, Pair<String, String>>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, String>>) = size > 5
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, String>>) = size > 200
     }
 
     /**

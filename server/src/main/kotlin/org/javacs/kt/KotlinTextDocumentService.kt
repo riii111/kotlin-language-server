@@ -20,6 +20,7 @@ import org.javacs.kt.rename.renameSymbol
 import org.javacs.kt.highlight.documentHighlightsAt
 import org.javacs.kt.inlayhints.provideHints
 import org.javacs.kt.symbols.documentSymbols
+import org.javacs.kt.imports.ImportPreloader
 import org.javacs.kt.util.AsyncExecutor
 import org.javacs.kt.util.Debouncer
 import org.javacs.kt.util.TemporaryDirectory
@@ -46,6 +47,7 @@ class KotlinTextDocumentService(
     private lateinit var client: LanguageClient
     private val async = AsyncExecutor()
     private val formattingService = FormattingService(config.formatting)
+    private val importPreloader = ImportPreloader(uriContentProvider.classContentProvider, cp)
 
     var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
     val lintTodo = mutableSetOf<URI>()
@@ -185,6 +187,14 @@ class KotlinTextDocumentService(
         val uri = parseURI(params.textDocument.uri)
         sf.open(uri, params.textDocument.text, params.textDocument.version)
         lintNow(uri)
+
+        // Preload imports in background to speed up go-to-definition
+        try {
+            val parsed = sp.parsedFile(uri)
+            importPreloader.preloadImports(parsed)
+        } catch (e: Exception) {
+            LOG.debug("Failed to preload imports for {}: {}", uri, e.message)
+        }
     }
 
     override fun didSave(params: DidSaveTextDocumentParams) {
@@ -341,6 +351,7 @@ class KotlinTextDocumentService(
     private fun shutdownExecutors(awaitTermination: Boolean) {
         async.shutdown(awaitTermination)
         debounceLint.shutdown(awaitTermination)
+        importPreloader.shutdown()
     }
 
     override fun close() {
