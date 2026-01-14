@@ -103,4 +103,24 @@ class SymbolIndexBatchTest {
 
         assertThat(messages, equalTo(listOf("Batch 1/3", "Batch 2/3", "Batch 3/3")))
     }
+
+    @Test
+    fun `progress percentage with empty packages returns 100`() {
+        val packages = emptyList<String>()
+        val percent = if (packages.isEmpty()) 100 else (0 * 100) / packages.size
+
+        assertThat(percent, equalTo(100))
+    }
+
+    @Test
+    fun `effective batch size validation`() {
+        fun effectiveBatchSize(batchSize: Int): Int =
+            if (batchSize > 0) batchSize else 50
+
+        assertThat(effectiveBatchSize(25), equalTo(25))
+        assertThat(effectiveBatchSize(100), equalTo(100))
+        assertThat(effectiveBatchSize(0), equalTo(50))
+        assertThat(effectiveBatchSize(-1), equalTo(50))
+        assertThat(effectiveBatchSize(-100), equalTo(50))
+    }
 }

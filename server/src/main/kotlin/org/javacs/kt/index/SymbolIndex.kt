@@ -165,6 +165,11 @@ class SymbolIndex(
         skipIfValid: Boolean = false,
         batchSize: Int = 50
     ) {
+        val effectiveBatchSize = if (batchSize > 0) batchSize else {
+            LOG.warn("Invalid batchSize $batchSize, using default of 50")
+            50
+        }
+
         if (skipIfValid && buildFileVersion > 0 && isIndexValid(buildFileVersion)) {
             LOG.info("Skipping index rebuild - persisted index is valid")
             return
@@ -177,7 +182,7 @@ class SymbolIndex(
         isIndexing = true
 
         val started = System.currentTimeMillis()
-        LOG.info("Updating full symbol index with batch size $batchSize...")
+        LOG.info("Updating full symbol index with batch size $effectiveBatchSize...")
 
         currentRefreshTask = progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
@@ -205,7 +210,7 @@ class SymbolIndex(
                     return@thenApplyAsync
                 }
 
-                val batches = packages.chunked(batchSize)
+                val batches = packages.chunked(effectiveBatchSize)
                 var processedPackages = 0
                 var lastUpdateTime = System.currentTimeMillis()
 
@@ -241,7 +246,7 @@ class SymbolIndex(
 
                     val now = System.currentTimeMillis()
                     if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || batchIndex == 0 || batchIndex == batches.size - 1) {
-                        val percent = (processedPackages * 100) / packages.size
+                        val percent = if (packages.isEmpty()) 100 else (processedPackages * 100) / packages.size
                         val batchInfo = "Batch ${batchIndex + 1}/${batches.size}"
                         progress.update(message = batchInfo, percent = percent)
                         lastUpdateTime = now
