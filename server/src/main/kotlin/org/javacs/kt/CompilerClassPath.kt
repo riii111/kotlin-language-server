@@ -181,8 +181,10 @@ class CompilerClassPath(
         return false
     }
 
+    @Synchronized
     private fun startBackgroundResolution() {
-        resolutionFuture.get()?.cancel(false)
+        val oldFuture = resolutionFuture.getAndSet(null)
+        oldFuture?.cancel(false)
 
         resolutionState = ClassPathResolutionState.RESOLVING
         LOG.info("Starting background classpath resolution")
@@ -196,7 +198,7 @@ class CompilerClassPath(
                 LOG.info("Classpath resolution completed")
                 onClassPathReady?.invoke()
             } catch (e: Exception) {
-                LOG.error("Classpath resolution failed: {}", e.message)
+                LOG.error("Classpath resolution failed", e)
                 resolutionState = ClassPathResolutionState.FAILED
             } finally {
                 progress.close()
@@ -259,6 +261,8 @@ class CompilerClassPath(
     }
 
     override fun close() {
+        resolutionFuture.get()?.cancel(true)
+        async.shutdown(awaitTermination = true)
         compiler.close()
         outputDirectory.delete()
     }

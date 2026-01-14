@@ -1,6 +1,7 @@
 package org.javacs.kt
 
 import org.javacs.kt.database.DatabaseService
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -24,6 +25,12 @@ class BackgroundClassPathTest {
             CodegenConfiguration(),
             databaseService
         )
+    }
+
+    @After
+    fun cleanup() {
+        classPath.close()
+        tempDir.toFile().deleteRecursively()
     }
 
     @Test
