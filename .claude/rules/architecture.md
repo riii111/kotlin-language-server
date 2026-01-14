@@ -1,0 +1,68 @@
+# Architecture
+
+## Project Structure
+
+```
+kotlin-language-server/
+├── server/                    # Main LSP implementation
+│   ├── src/main/kotlin/org/javacs/kt/
+│   ├── src/test/kotlin/       # Comprehensive test suite
+│   └── build.gradle.kts       # Application configuration
+├── shared/                    # Shared utilities (classpath, database, utils)
+│   └── src/main/kotlin/org/javacs/kt/
+├── platform/                  # Dependency management (BOM)
+├── buildSrc/                  # Custom Gradle plugins
+└── gradle.properties          # Build properties (version=1.3.14)
+```
+
+## Module Structure
+
+### Server Module (`server/`)
+
+**Core Files:**
+
+| File | Responsibility |
+|------|----------------|
+| `Main.kt` | Entry point (stdio/TCP Server/TCP Client modes) |
+| `KotlinLanguageServer.kt` | LSP LanguageServer interface implementation |
+| `KotlinTextDocumentService.kt` | Text document operations (completion, hover, etc.) |
+| `KotlinWorkspaceService.kt` | Workspace operations (symbol search, commands) |
+| `Configuration.kt` | Initialization options configuration |
+| `CompiledFile.kt` | Incremental compilation management |
+| `CompilerClassPath.kt` | Kotlin compiler setup |
+| `SourcePath.kt` | Source file cache and management |
+
+### Shared Module (`shared/`)
+
+| Directory | Purpose |
+|-----------|---------|
+| `classpath/` | Maven/Gradle/Shell classpath resolution |
+| `database/` | Exposed ORM for symbol index DB |
+| `util/` | Async execution, shell commands, URI handling |
+
+**Classpath Resolution Chain:**
+
+```
+DefaultClassPathResolver (main)
+  ├─ ShellClassPathResolver (custom scripts)
+  ├─ MavenClassPathResolver (pom.xml)
+  └─ GradleClassPathResolver (build.gradle/build.gradle.kts)
+      └─ WithStdlibResolver (Kotlin stdlib)
+          └─ BackupClassPathResolver (fallback)
+└─ CachedClassPathResolver (optional, with in-memory cache)
+```
+
+## Key Classes
+
+1. **`KotlinLanguageServer`** - Main server entry, handles LSP lifecycle
+2. **`SourcePath`** - File cache management, incremental compilation
+3. **`CompiledFile`** - Represents compiled file with binding context
+4. **`Compiler`** - Kotlin compiler API wrapper
+5. **`SymbolIndex`** - Global symbol indexing with Exposed ORM
+
+## Adding a New LSP Feature
+
+1. Create implementation in appropriate subdirectory under `server/src/main/kotlin/org/javacs/kt/`
+2. Register in `KotlinTextDocumentService` or `KotlinWorkspaceService`
+3. Advertise capability in `KotlinLanguageServer.initialize()`
+4. Add tests in `server/src/test/kotlin/`
