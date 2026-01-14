@@ -121,9 +121,20 @@ class DatabaseService {
 
     private fun getDbFromFile(storagePath: Path?): Database? {
         return storagePath?.let {
+            // Create directory if it doesn't exist
+            if (!Files.exists(it)) {
+                try {
+                    Files.createDirectories(it)
+                    LOG.info("Created storage directory: $it")
+                } catch (e: Exception) {
+                    LOG.warn("Failed to create storage directory: $it - ${e.message}")
+                    return@let null
+                }
+            }
             if (Files.isDirectory(it)) {
                 Database.connect("jdbc:sqlite:${getDbFilePath(it)}")
             } else {
+                LOG.warn("storagePath exists but is not a directory: $it")
                 null
             }
         }

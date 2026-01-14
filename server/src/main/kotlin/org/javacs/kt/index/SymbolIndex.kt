@@ -274,10 +274,10 @@ class SymbolIndex(
 
                             if (buildFileVersion > 0 && isPersistent) {
                                 SymbolIndexMetadata.deleteAll()
-                                SymbolIndexMetadataEntity.new {
-                                    this.buildFileVersion = buildFileVersion
-                                    this.indexedAt = System.currentTimeMillis()
-                                    this.symbolCount = symbolCount
+                                SymbolIndexMetadata.insert {
+                                    it[SymbolIndexMetadata.buildFileVersion] = buildFileVersion
+                                    it[indexedAt] = System.currentTimeMillis()
+                                    it[SymbolIndexMetadata.symbolCount] = symbolCount
                                 }
                                 LOG.debug("Symbol index metadata updated: buildFileVersion=$buildFileVersion, symbolCount=$symbolCount")
                             }
@@ -315,10 +315,10 @@ class SymbolIndex(
                     LOG.info("Updated symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
 
                     if (isPersistent) {
-                        val existing = SymbolIndexMetadataEntity.all().firstOrNull()
-                        if (existing != null) {
-                            existing.symbolCount = symbolCount
-                            existing.indexedAt = System.currentTimeMillis()
+                        // Use direct SQL update to avoid Entity cache issues
+                        SymbolIndexMetadata.update {
+                            it[SymbolIndexMetadata.symbolCount] = symbolCount
+                            it[indexedAt] = System.currentTimeMillis()
                         }
                     }
                 }
@@ -347,12 +347,14 @@ class SymbolIndex(
             val (descriptorFqn, extensionReceiverFqn) = getFqNames(declaration)
 
             if (validFqName(descriptorFqn) && (extensionReceiverFqn?.let { validFqName(it) } != false)) {
-                SymbolEntity.new {
-                    fqName = descriptorFqn.toString()
-                    shortName = descriptorFqn.shortName().toString()
-                    kind = declaration.accept(ExtractSymbolKind, Unit).rawValue
-                    visibility = declaration.accept(ExtractSymbolVisibility, Unit).rawValue
-                    extensionReceiverType = extensionReceiverFqn?.toString()
+                // Use direct SQL insert instead of SymbolEntity.new to avoid Entity cache issues
+                // that cause "Symbols.id is not in record set" errors when flushing
+                Symbols.insert {
+                    it[fqName] = descriptorFqn.toString()
+                    it[shortName] = descriptorFqn.shortName().toString()
+                    it[kind] = declaration.accept(ExtractSymbolKind, Unit).rawValue
+                    it[visibility] = declaration.accept(ExtractSymbolVisibility, Unit).rawValue
+                    it[extensionReceiverType] = extensionReceiverFqn?.toString()
                 }
             } else {
                 LOG.warn("Excluding symbol {} from index since its name is too long", descriptorFqn.toString())
