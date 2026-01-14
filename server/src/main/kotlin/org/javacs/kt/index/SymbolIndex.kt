@@ -14,6 +14,7 @@ import org.jetbrains.exposed.dao.IntEntityClass
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.*
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.withLock
@@ -98,6 +99,10 @@ class SymbolIndex(
 
     private val indexLock = ReentrantReadWriteLock()
 
+    @Volatile
+    private var cancellationRequested = false
+    private var currentRefreshTask: CompletableFuture<*>? = null
+
     var progressFactory: Progress.Factory = Progress.Factory.None
 
     init {
@@ -108,14 +113,25 @@ class SymbolIndex(
 
     /** Rebuilds the entire index. May take a while. */
     fun refresh(module: ModuleDescriptor, exclusions: Sequence<DeclarationDescriptor>) {
+        // Cancel any existing refresh task
+        cancelCurrentRefresh()
+        cancellationRequested = false
+
         val started = System.currentTimeMillis()
         LOG.info("Updating full symbol index...")
 
-        progressFactory.create("Indexing").thenApplyAsync { progress ->
+        currentRefreshTask = progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
                 // Phase 1: Collect all packages for progress tracking
                 val packages = collectAllPackages(module)
                 LOG.info("Found ${packages.size} packages to index")
+
+                // Check for cancellation before acquiring lock
+                if (cancellationRequested) {
+                    LOG.info("Indexing cancelled before starting")
+                    progress.close()
+                    return@thenApplyAsync
+                }
 
                 indexLock.writeLock().withLock {
                     transaction(db) {
@@ -125,7 +141,13 @@ class SymbolIndex(
                         // Phase 2: Process packages with progress updates
                         var lastUpdateTime = System.currentTimeMillis()
 
-                        packages.forEachIndexed { index, pkgName ->
+                        for ((index, pkgName) in packages.withIndex()) {
+                            // Check for cancellation at each package
+                            if (cancellationRequested) {
+                                LOG.info("Indexing cancelled at package $index/${packages.size}")
+                                return@transaction
+                            }
+
                             // Throttled progress update
                             val now = System.currentTimeMillis()
                             if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
@@ -147,9 +169,11 @@ class SymbolIndex(
                             }
                         }
 
-                        val finished = System.currentTimeMillis()
-                        val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
-                        LOG.info("Updated full symbol index in ${finished - started} ms! (${count} symbol(s))")
+                        if (!cancellationRequested) {
+                            val finished = System.currentTimeMillis()
+                            val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
+                            LOG.info("Updated full symbol index in ${finished - started} ms! (${count} symbol(s))")
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -159,6 +183,13 @@ class SymbolIndex(
 
             progress.close()
         }
+    }
+
+    /** Cancels the current refresh task if one is running. */
+    fun cancelCurrentRefresh() {
+        cancellationRequested = true
+        currentRefreshTask?.cancel(false)
+        currentRefreshTask = null
     }
 
     // Removes a list of indexes and adds another list. Everything is done in the same transaction.
