@@ -30,7 +30,6 @@ class CompilerClassPath(
     val outputDirectory: File = Files.createTempDirectory("klsBuildOutput").toFile()
     val javaHome: String? = System.getProperty("java.home", null)
 
-    // Cached resolver to avoid expensive re-creation on every access
     @Volatile
     private var cachedResolver: ClassPathResolver? = null
 
@@ -67,7 +66,6 @@ class CompilerClassPath(
         updateJavaSourcePath: Boolean = true
     ): Boolean {
         // TODO: Fetch class path and build script class path concurrently (and asynchronously)
-        // Invalidate and recreate resolver when workspace changes
         cachedResolver = null
         val resolver = getOrCreateResolver()
         var refreshCompiler = updateJavaSourcePath

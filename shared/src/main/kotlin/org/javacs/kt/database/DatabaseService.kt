@@ -23,7 +23,6 @@ class DatabaseMetadataEntity(id: EntityID<Int>) : IntEntity(id) {
     var version by DatabaseMetadata.version
 }
 
-// Symbol index table definitions
 private const val MAX_FQNAME_LENGTH = 255
 private const val MAX_SHORT_NAME_LENGTH = 80
 private const val MAX_URI_LENGTH = 511
@@ -54,7 +53,6 @@ object Positions : IntIdTable() {
     val character = integer("character")
 }
 
-// Symbol index metadata for tracking index validity
 object SymbolIndexMetadata : IntIdTable() {
     val buildFileVersion = long("buildfileversion")
     val indexedAt = long("indexedat")
@@ -114,12 +112,10 @@ class DatabaseService {
             LOG.info("Database has the correct version $currentVersion and will be used as-is")
         }
 
-        // Create symbol index tables
         db?.let { dbInstance ->
             transaction(dbInstance) {
                 SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions, SymbolIndexMetadata)
             }
-            LOG.info("Symbol index tables initialized in SQLite")
         }
     }
 
