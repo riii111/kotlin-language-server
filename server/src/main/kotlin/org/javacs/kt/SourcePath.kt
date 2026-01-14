@@ -289,12 +289,17 @@ class SourcePath(
         files.keys.forEach { save(it) }
     }
 
+    /**
+     * Refreshes dependency indexes. Called on startup via lintAll().
+     * On startup, attempts to use persisted index if valid.
+     */
     fun refreshDependencyIndexes() {
         compileAllFiles()
 
         val module = files.values.first { it.module != null }.module
         if (module != null) {
-            refreshDependencyIndexes(module)
+            // On initial load, try to skip rebuilding if persisted index is valid
+            refreshDependencyIndexes(module, skipIfValid = true)
         }
     }
 
@@ -313,11 +318,13 @@ class SourcePath(
 
     /**
      * Refreshes the indexes. If already done, refreshes only the declarations in the files that were changed.
+     * When skipIfValid is true and a valid persisted index exists, skips rebuilding.
      */
-    private fun refreshDependencyIndexes(module: ModuleDescriptor) = indexAsync.execute {
+    private fun refreshDependencyIndexes(module: ModuleDescriptor, skipIfValid: Boolean = false) = indexAsync.execute {
         if (indexEnabled) {
             val declarations = getDeclarationDescriptors(files.values)
-            index.refresh(module, declarations)
+            val buildFileVersion = cp.currentBuildFileVersion
+            index.refresh(module, declarations, buildFileVersion, skipIfValid)
         }
     }
 

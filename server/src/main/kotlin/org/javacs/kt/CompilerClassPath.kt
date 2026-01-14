@@ -29,6 +29,10 @@ class CompilerClassPath(
     val outputDirectory: File = Files.createTempDirectory("klsBuildOutput").toFile()
     val javaHome: String? = System.getProperty("java.home", null)
 
+    /** Returns the current build file version (max timestamp of all build files) */
+    val currentBuildFileVersion: Long
+        get() = defaultClassPathResolver(workspaceRoots, databaseService.db).currentBuildFileVersion
+
     var compiler = Compiler(
         javaSourcePath,
         classPath.map { it.compiledJar }.toSet(),
