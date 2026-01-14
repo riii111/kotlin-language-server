@@ -63,6 +63,7 @@ class KotlinTextDocumentService(
 
     // Response caches for LSP operations
     private val definitionCache = LspResponseCache<Location?>()
+    private val hoverCache = LspResponseCache<Hover?>()
 
     var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
     val lintTodo = mutableSetOf<URI>()
@@ -127,8 +128,24 @@ class KotlinTextDocumentService(
         CompletableFuture.supplyAsync({
             reportTime {
                 LOG.info("Hovering at {}", describePosition(position))
+                val uri = parseURI(position.textDocument.uri)
+                val fileVersion = sf.getVersion(uri)
+                val line = position.position.line
+                val character = position.position.character
+
+                // Check cache first
+                hoverCache.get(uri, line, character, fileVersion)?.let { cached ->
+                    LOG.info("Hover cache hit")
+                    return@supplyAsync cached
+                }
+
                 val (file, cursor) = recover(position, Recompile.NEVER) ?: return@supplyAsync null
-                hoverAt(file, cursor) ?: noResult("No hover found at ${describePosition(position)}", null)
+                val result = hoverAt(file, cursor)
+
+                // Store in cache (including null results to avoid repeated lookups)
+                hoverCache.put(uri, line, character, fileVersion, result)
+
+                result ?: noResult("No hover found at ${describePosition(position)}", null)
             }
         }, hoverExecutor)
 
@@ -257,6 +274,7 @@ class KotlinTextDocumentService(
         val uri = parseURI(params.textDocument.uri)
         // Invalidate caches for this file
         definitionCache.invalidate(uri)
+        hoverCache.invalidate(uri)
         sf.edit(uri, params.textDocument.version, params.contentChanges)
         lintLater(uri)
     }
