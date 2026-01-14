@@ -54,6 +54,21 @@ object Positions : IntIdTable() {
     val character = integer("character")
 }
 
+// Symbol index metadata for tracking index validity
+object SymbolIndexMetadata : IntIdTable() {
+    val buildFileVersion = long("buildfileversion")
+    val indexedAt = long("indexedat")
+    val symbolCount = integer("symbolcount")
+}
+
+class SymbolIndexMetadataEntity(id: EntityID<Int>) : IntEntity(id) {
+    companion object : IntEntityClass<SymbolIndexMetadataEntity>(SymbolIndexMetadata)
+
+    var buildFileVersion by SymbolIndexMetadata.buildFileVersion
+    var indexedAt by SymbolIndexMetadata.indexedAt
+    var symbolCount by SymbolIndexMetadata.symbolCount
+}
+
 class DatabaseService {
 
     companion object {
@@ -98,7 +113,7 @@ class DatabaseService {
         // Create symbol index tables
         db?.let { dbInstance ->
             transaction(dbInstance) {
-                SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions)
+                SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions, SymbolIndexMetadata)
             }
             LOG.info("Symbol index tables initialized in SQLite")
         }

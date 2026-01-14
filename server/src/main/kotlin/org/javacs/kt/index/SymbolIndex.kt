@@ -12,6 +12,8 @@ import org.javacs.kt.database.Symbols
 import org.javacs.kt.database.Locations
 import org.javacs.kt.database.Ranges
 import org.javacs.kt.database.Positions
+import org.javacs.kt.database.SymbolIndexMetadata
+import org.javacs.kt.database.SymbolIndexMetadataEntity
 import org.javacs.kt.progress.Progress
 import org.jetbrains.exposed.dao.IntEntity
 import org.jetbrains.exposed.dao.IntEntityClass
@@ -68,7 +70,6 @@ class SymbolIndex(
 
     private val db: Database by lazy {
         databaseService.db ?: Database.connect("jdbc:h2:mem:symbolindex;DB_CLOSE_DELAY=-1", "org.h2.Driver").also {
-            // Create tables for in-memory database
             transaction(it) {
                 SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions)
             }
@@ -82,26 +83,92 @@ class SymbolIndex(
 
     var progressFactory: Progress.Factory = Progress.Factory.None
 
+    /**
+     * Checks if the persisted index is valid for the given build file version.
+     * Returns true if the index exists and was built with the same or newer build file version.
+     */
+    fun isIndexValid(currentBuildFileVersion: Long): Boolean {
+        if (!isPersistent) return false
+
+        return try {
+            transaction(db) {
+                val metadata = SymbolIndexMetadataEntity.all().firstOrNull()
+                if (metadata == null) {
+                    LOG.info("No symbol index metadata found, index needs to be rebuilt")
+                    false
+                } else if (metadata.buildFileVersion < currentBuildFileVersion) {
+                    LOG.info("Symbol index is stale (indexed at version ${metadata.buildFileVersion}, current version $currentBuildFileVersion)")
+                    false
+                } else if (metadata.symbolCount == 0) {
+                    LOG.info("Symbol index is empty, needs to be rebuilt")
+                    false
+                } else {
+                    LOG.info("Symbol index is valid (${metadata.symbolCount} symbols, indexed at version ${metadata.buildFileVersion})")
+                    true
+                }
+            }
+        } catch (e: Exception) {
+            LOG.warn("Error checking symbol index validity: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Returns the number of symbols in the persisted index, or 0 if not available.
+     */
+    fun getIndexedSymbolCount(): Int {
+        return try {
+            transaction(db) {
+                countSymbols()
+            }
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    private fun countSymbols(): Int =
+        Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()].toInt()
+
+    private fun clearAllSymbolTables() {
+        Symbols.deleteAll()
+        Locations.deleteAll()
+        Ranges.deleteAll()
+        Positions.deleteAll()
+    }
+
+    private fun updateMetadata(buildFileVersion: Long, symbolCount: Int) {
+        if (!isPersistent) return
+
+        SymbolIndexMetadata.deleteAll()
+        SymbolIndexMetadataEntity.new {
+            this.buildFileVersion = buildFileVersion
+            this.indexedAt = System.currentTimeMillis()
+            this.symbolCount = symbolCount
+        }
+        LOG.info("Symbol index metadata updated: buildFileVersion=$buildFileVersion, symbolCount=$symbolCount")
+    }
+
     /** Rebuilds the entire index. May take a while. */
-    fun refresh(module: ModuleDescriptor, exclusions: Sequence<DeclarationDescriptor>) {
+    fun refresh(module: ModuleDescriptor, exclusions: Sequence<DeclarationDescriptor>, buildFileVersion: Long = 0L, skipIfValid: Boolean = false) {
+        if (skipIfValid && buildFileVersion > 0 && isIndexValid(buildFileVersion)) {
+            LOG.info("Skipping index rebuild - persisted index is valid")
+            return
+        }
+
         val started = System.currentTimeMillis()
         LOG.info("Updating full symbol index...")
 
         progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
-                // Phase 1: Collect all packages for progress tracking
                 val packages = collectAllPackages(module)
                 LOG.info("Found ${packages.size} packages to index")
 
-                transaction(db) {
-                    // Remove everything first.
-                    Symbols.deleteAll()
+                val symbolCount = transaction(db) {
+                    clearAllSymbolTables()
 
-                    // Phase 2: Process packages with progress updates
                     var lastUpdateTime = System.currentTimeMillis()
 
                     packages.forEachIndexed { index, pkgName ->
-                        // Throttled progress update
                         val now = System.currentTimeMillis()
                         if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
                             val percent = ((index + 1) * 100) / packages.size
@@ -110,7 +177,6 @@ class SymbolIndex(
                             lastUpdateTime = now
                         }
 
-                        // Index descriptors from this package
                         val pkg = module.getPackage(pkgName)
                         try {
                             val descriptors = pkg.memberScope.getContributedDescriptors(
@@ -123,8 +189,14 @@ class SymbolIndex(
                     }
 
                     val finished = System.currentTimeMillis()
-                    val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
+                    val count = countSymbols()
                     LOG.info("Updated full symbol index in ${finished - started} ms! (${count} symbol(s))")
+
+                    if (buildFileVersion > 0) {
+                        updateMetadata(buildFileVersion, count)
+                    }
+
+                    count
                 }
             } catch (e: Exception) {
                 LOG.error("Error while updating symbol index")
@@ -135,7 +207,6 @@ class SymbolIndex(
         }
     }
 
-    // Removes a list of indexes and adds another list. Everything is done in the same transaction.
     fun updateIndexes(remove: Sequence<DeclarationDescriptor>, add: Sequence<DeclarationDescriptor>) {
         val started = System.currentTimeMillis()
         LOG.info("Updating symbol index...")
@@ -146,7 +217,7 @@ class SymbolIndex(
                 addDeclarations(add)
 
                 val finished = System.currentTimeMillis()
-                val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
+                val count = countSymbols()
                 LOG.info("Updated symbol index in ${finished - started} ms! (${count} symbol(s))")
             }
         } catch (e: Exception) {
@@ -210,7 +281,6 @@ class SymbolIndex(
             ) }
     }
 
-    /** Collects all packages into a list for counting and progress tracking. */
     private fun collectAllPackages(module: ModuleDescriptor): List<FqName> {
         val result = mutableListOf<FqName>()
         fun collect(pkgName: FqName) {
