@@ -214,4 +214,17 @@ class SymbolIndex(
         .getSubPackagesOf(pkgName) { it.toString() != "META-INF" }
         .asSequence()
         .flatMap { sequenceOf(it) + allPackages(module, it) }
+
+    /** Collects all packages into a list for counting and progress tracking. */
+    private fun collectAllPackages(module: ModuleDescriptor): List<FqName> {
+        val result = mutableListOf<FqName>()
+        fun collect(pkgName: FqName) {
+            module.getSubPackagesOf(pkgName) { it.toString() != "META-INF" }.forEach { subPkg ->
+                result.add(subPkg)
+                collect(subPkg)
+            }
+        }
+        collect(FqName.ROOT)
+        return result
+    }
 }
