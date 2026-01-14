@@ -25,7 +25,7 @@ class ClassContentProvider(
 ) {
     /** Maps recently used (source-)KLS-URIs to their source contents (e.g. decompiled code) and the file extension. */
     private val cachedContents = object : LinkedHashMap<String, Pair<String, String>>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, String>>) = size > 5
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, String>>) = size > 200
     }
 
     /**
@@ -35,17 +35,21 @@ class ClassContentProvider(
      * If the file is inside a source archive, the source code is returned as is.
      */
     fun contentOf(uri: KlsURI): Pair<KlsURI, String> {
+        val key = uri.toString()
+        cachedContents[key]?.let { (contents, extension) ->
+            val resolvedUri = sourceArchiveProvider.fetchSourceArchive(uri.archivePath)?.let(uri.withSource(true)::withArchivePath) ?: uri
+            return Pair(resolvedUri.withFileExtension(extension), contents)
+        }
+
         LOG.info("Resolving {} for contents", uri)
         val resolvedUri = sourceArchiveProvider.fetchSourceArchive(uri.archivePath)?.let(uri.withSource(true)::withArchivePath) ?: uri
-        val key = resolvedUri.toString()
-        val (contents, extension) = cachedContents[key] ?: run {
-                LOG.info("Reading contents of {}", describeURI(resolvedUri.fileUri))
-                tryReadContentOf(resolvedUri)
-                    ?: tryReadContentOf(resolvedUri.withFileExtension("class"))
-                    ?: tryReadContentOf(resolvedUri.withFileExtension("java"))
-                    ?: tryReadContentOf(resolvedUri.withFileExtension("kt"))
-                    ?: throw KotlinLSException("Could not find $uri")
-            }.also { cachedContents[key] = it }
+        LOG.info("Reading contents of {}", describeURI(resolvedUri.fileUri))
+        val (contents, extension) = tryReadContentOf(resolvedUri)
+            ?: tryReadContentOf(resolvedUri.withFileExtension("class"))
+            ?: tryReadContentOf(resolvedUri.withFileExtension("java"))
+            ?: tryReadContentOf(resolvedUri.withFileExtension("kt"))
+            ?: throw KotlinLSException("Could not find $uri")
+        cachedContents[key] = Pair(contents, extension)
         val sourceUri = resolvedUri.withFileExtension(extension)
         return Pair(sourceUri, contents)
     }
