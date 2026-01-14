@@ -103,11 +103,39 @@ class SymbolIndex(
 
         progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
+                // Phase 1: Collect all packages for progress tracking
+                val packages = collectAllPackages(module)
+                LOG.info("Found ${packages.size} packages to index")
+
                 transaction(db) {
                     // Remove everything first.
                     Symbols.deleteAll()
-                    // Add new ones.
-                    addDeclarations(allDescriptors(module, exclusions))
+
+                    // Phase 2: Process packages with progress updates
+                    var lastUpdateTime = System.currentTimeMillis()
+                    val minUpdateIntervalMs = 100L // Throttle: max 10 updates/second
+
+                    packages.forEachIndexed { index, pkgName ->
+                        // Throttled progress update
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdateTime >= minUpdateIntervalMs || index == 0 || index == packages.size - 1) {
+                            val percent = if (packages.isEmpty()) 100 else ((index + 1) * 100) / packages.size
+                            val shortName = pkgName.shortName().asString().takeIf { it.isNotEmpty() } ?: "root"
+                            progress.update(message = shortName, percent = percent)
+                            lastUpdateTime = now
+                        }
+
+                        // Index descriptors from this package
+                        val pkg = module.getPackage(pkgName)
+                        try {
+                            val descriptors = pkg.memberScope.getContributedDescriptors(
+                                DescriptorKindFilter.ALL
+                            ) { name -> !exclusions.any { declaration -> declaration.name == name } }
+                            addDeclarations(descriptors.asSequence())
+                        } catch (e: IllegalStateException) {
+                            LOG.warn("Could not query descriptors in package $pkgName")
+                        }
+                    }
 
                     val finished = System.currentTimeMillis()
                     val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
