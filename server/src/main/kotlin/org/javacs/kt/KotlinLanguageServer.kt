@@ -171,7 +171,9 @@ class KotlinLanguageServer(
         return completedFuture(null)
     }
 
-    override fun exit() {}
+    override fun exit() {
+        System.exit(0)
+    }
 
     // Fixed in https://github.com/eclipse/lsp4j/commit/04b0c6112f0a94140e22b8b15bb5a90d5a0ed851
     // Causes issue in lsp 0.15
