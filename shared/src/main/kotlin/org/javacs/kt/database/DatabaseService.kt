@@ -34,6 +34,7 @@ object Symbols : IntIdTable() {
     val visibility = integer("visibility")
     val extensionReceiverType = varchar("extensionreceivertype", length = MAX_FQNAME_LENGTH).nullable()
     val location = optReference("location", Locations)
+    val sourceJar = varchar("sourcejar", length = MAX_URI_LENGTH).nullable().index()
 
     val byShortName = index("symbol_shortname_index", false, shortName)
 }
@@ -67,6 +68,20 @@ class SymbolIndexMetadataEntity(id: EntityID<Int>) : IntEntity(id) {
     var symbolCount by SymbolIndexMetadata.symbolCount
 }
 
+object IndexedJars : IntIdTable() {
+    val jarPath = varchar("jarpath", length = MAX_URI_LENGTH).uniqueIndex()
+    val indexedAt = long("indexedat")
+    val symbolCount = integer("symbolcount")
+}
+
+class IndexedJarEntity(id: EntityID<Int>) : IntEntity(id) {
+    companion object : IntEntityClass<IndexedJarEntity>(IndexedJars)
+
+    var jarPath by IndexedJars.jarPath
+    var indexedAt by IndexedJars.indexedAt
+    var symbolCount by IndexedJars.symbolCount
+}
+
 class DatabaseService {
 
     companion object {
@@ -74,7 +89,7 @@ class DatabaseService {
          * Database schema version. Increment this when changing table structures.
          * When version mismatches, the database will be deleted and recreated.
          */
-        const val DB_VERSION = 5
+        const val DB_VERSION = 6
         const val DB_FILENAME = "kls_database.db"
     }
 
@@ -114,7 +129,7 @@ class DatabaseService {
 
         db?.let { dbInstance ->
             transaction(dbInstance) {
-                SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions, SymbolIndexMetadata)
+                SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions, SymbolIndexMetadata, IndexedJars)
             }
         }
     }
