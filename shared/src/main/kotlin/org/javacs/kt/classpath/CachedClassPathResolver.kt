@@ -8,6 +8,7 @@ import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.deleteAll
+import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -66,10 +67,10 @@ internal class CachedClassPathResolver(
         }
         set(newEntries) = transaction(db) {
             ClassPathCacheEntry.deleteAll()
-            newEntries.map {
-                ClassPathCacheEntryEntity.new {
-                    compiledJar = it.compiledJar.toString()
-                    sourceJar = it.sourceJar?.toString()
+            newEntries.forEach {
+                ClassPathCacheEntry.insert { row ->
+                    row[compiledJar] = it.compiledJar.toString()
+                    row[sourceJar] = it.sourceJar?.toString()
                 }
             }
         }
@@ -78,7 +79,9 @@ internal class CachedClassPathResolver(
         get() = transaction(db) { BuildScriptClassPathCacheEntryEntity.all().map { Paths.get(it.jar) }.toSet() }
         set(newEntries) = transaction(db) {
             BuildScriptClassPathCacheEntry.deleteAll()
-            newEntries.map { BuildScriptClassPathCacheEntryEntity.new { jar = it.toString() } }
+            newEntries.forEach { entry ->
+                BuildScriptClassPathCacheEntry.insert { row -> row[jar] = entry.toString() }
+            }
         }
 
     private var cachedClassPathMetadata
@@ -93,9 +96,9 @@ internal class CachedClassPathResolver(
         set(newClassPathMetadata) = transaction(db) {
             ClassPathMetadataCache.deleteAll()
             val newClassPathMetadataRow = newClassPathMetadata ?: ClasspathMetadata()
-            ClassPathMetadataCacheEntity.new {
-                includesSources = newClassPathMetadataRow.includesSources
-                buildFileVersion = newClassPathMetadataRow.buildFileVersion
+            ClassPathMetadataCache.insert { row ->
+                row[includesSources] = newClassPathMetadataRow.includesSources
+                row[buildFileVersion] = newClassPathMetadataRow.buildFileVersion
             }
         }
 
