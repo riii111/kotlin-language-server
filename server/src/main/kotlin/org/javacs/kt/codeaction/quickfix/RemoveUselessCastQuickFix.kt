@@ -37,6 +37,10 @@ class RemoveUselessCastQuickFix : QuickFix {
                 val inRange = diag.textRanges.any { textRange ->
                     val diagStart = textRange.startOffset
                     val diagEnd = textRange.endOffset
+                    // Compiler diagnostics may reference stale offsets when file content is out of sync
+                    if (diagStart < 0 || diagEnd > file.content.length || diagStart >= diagEnd) {
+                        return@any false
+                    }
                     // For zero-length ranges (cursor position), check if on the same line
                     if (startCursor == endCursor) {
                         val diagRange = range(file.content, textRange)
@@ -52,7 +56,7 @@ class RemoveUselessCastQuickFix : QuickFix {
                 kotlinDiag.textRanges.mapNotNull { textRange ->
                     val start = textRange.startOffset
                     val end = textRange.endOffset
-                    if (start >= end) return@mapNotNull null
+                    if (start < 0 || end > file.content.length || start >= end) return@mapNotNull null
 
                     val originalText = file.content.substring(start, end)
 
