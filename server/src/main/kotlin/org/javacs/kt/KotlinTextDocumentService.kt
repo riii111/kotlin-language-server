@@ -20,7 +20,6 @@ import org.javacs.kt.rename.renameSymbol
 import org.javacs.kt.highlight.documentHighlightsAt
 import org.javacs.kt.inlayhints.provideHints
 import org.javacs.kt.symbols.documentSymbols
-import org.javacs.kt.imports.ImportPreloader
 import org.javacs.kt.util.AsyncExecutor
 import org.javacs.kt.util.Debouncer
 import org.javacs.kt.util.TemporaryDirectory
@@ -54,7 +53,6 @@ class KotlinTextDocumentService(
         Thread(r, "kls-precompile").apply { isDaemon = true }
     }
     private val formattingService = FormattingService(config.formatting)
-    private val importPreloader = ImportPreloader(uriContentProvider.classContentProvider, cp)
 
     var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
     val lintTodo = mutableSetOf<URI>()
@@ -360,7 +358,6 @@ class KotlinTextDocumentService(
     private fun shutdownExecutors(awaitTermination: Boolean) {
         async.shutdown(awaitTermination)
         debounceLint.shutdown(awaitTermination)
-        importPreloader.shutdown()
         definitionExecutor.shutdown()
         precompileExecutor.shutdown()
     }
