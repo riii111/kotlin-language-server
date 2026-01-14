@@ -19,6 +19,13 @@ data class ClassPathDiff(
     val hasChanges: Boolean get() = added.isNotEmpty() || removed.isNotEmpty()
 }
 
+enum class ClassPathResolutionState {
+    PENDING,
+    RESOLVING,
+    READY,
+    FAILED
+}
+
 class CompilerClassPath(
     private val config: CompilerConfiguration,
     private val scriptsConfig: ScriptsConfiguration,
@@ -57,6 +64,14 @@ class CompilerClassPath(
         private set
 
     private val async = AsyncExecutor()
+
+    @Volatile
+    var resolutionState: ClassPathResolutionState = ClassPathResolutionState.PENDING
+        private set
+
+    val isReady: Boolean get() = resolutionState == ClassPathResolutionState.READY
+
+    var onClassPathReady: (() -> Unit)? = null
 
     init {
         compiler.updateConfiguration(config)
