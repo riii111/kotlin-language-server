@@ -22,6 +22,7 @@ import org.javacs.kt.inlayhints.provideHints
 import org.javacs.kt.symbols.documentSymbols
 import org.javacs.kt.util.AsyncExecutor
 import org.javacs.kt.util.Debouncer
+import org.javacs.kt.util.LspResponseCache
 import org.javacs.kt.util.TemporaryDirectory
 import org.javacs.kt.util.describeURI
 import org.javacs.kt.util.describeURIs
@@ -59,6 +60,9 @@ class KotlinTextDocumentService(
         Thread(r, "kls-references").apply { isDaemon = true }
     }
     private val formattingService = FormattingService(config.formatting)
+
+    // Response caches for LSP operations
+    private val definitionCache = LspResponseCache<Location?>()
 
     var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
     val lintTodo = mutableSetOf<URI>()
@@ -141,10 +145,25 @@ class KotlinTextDocumentService(
         CompletableFuture.supplyAsync({
             reportTime {
                 LOG.info("Go-to-definition at {}", describePosition(position))
+                val uri = parseURI(position.textDocument.uri)
+                val fileVersion = sf.getVersion(uri)
+                val line = position.position.line
+                val character = position.position.character
+
+                // Check cache first
+                definitionCache.get(uri, line, character, fileVersion)?.let { cached ->
+                    LOG.info("Definition cache hit")
+                    return@supplyAsync Either.forLeft(listOf(cached))
+                }
+
                 val (file, cursor) = recover(position, Recompile.NEVER)
                     ?: return@supplyAsync Either.forLeft(emptyList())
-                goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
-                    ?.let(::listOf)
+                val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
+
+                // Store in cache
+                result?.let { definitionCache.put(uri, line, character, fileVersion, it) }
+
+                result?.let(::listOf)
                     ?.let { Either.forLeft<List<Location>, List<LocationLink>>(it) }
                     ?: noResult("Couldn't find definition at ${describePosition(position)}", Either.forLeft(emptyList()))
             }
@@ -236,6 +255,8 @@ class KotlinTextDocumentService(
 
     override fun didChange(params: DidChangeTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
+        // Invalidate caches for this file
+        definitionCache.invalidate(uri)
         sf.edit(uri, params.textDocument.version, params.contentChanges)
         lintLater(uri)
     }

@@ -58,6 +58,8 @@ private class NotifySourcePath(private val sp: SourcePath) {
     }
 
     val keys get() = files.keys
+
+    fun getVersion(uri: URI): Int = files[uri]?.version ?: -1
 }
 
 /**
@@ -196,6 +198,8 @@ class SourceFiles(
     fun isOpen(uri: URI): Boolean = (uri in open)
 
     fun isIncluded(uri: URI): Boolean = exclusions.isURIIncluded(uri)
+
+    fun getVersion(uri: URI): Int = files.getVersion(uri)
 }
 
 private fun patch(sourceText: String, change: TextDocumentContentChangeEvent): String {
