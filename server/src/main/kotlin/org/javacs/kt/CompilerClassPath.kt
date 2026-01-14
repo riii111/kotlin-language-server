@@ -7,6 +7,8 @@ import org.javacs.kt.compiler.Compiler
 import org.javacs.kt.database.DatabaseService
 import org.javacs.kt.util.AsyncExecutor
 import java.io.Closeable
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicReference
 import java.io.File
 import java.nio.file.FileSystems
 import java.nio.file.Files
@@ -64,6 +66,7 @@ class CompilerClassPath(
         private set
 
     private val async = AsyncExecutor()
+    private val resolutionFuture = AtomicReference<CompletableFuture<*>?>(null)
 
     @Volatile
     var resolutionState: ClassPathResolutionState = ClassPathResolutionState.PENDING
@@ -170,7 +173,28 @@ class CompilerClassPath(
         workspaceRoots.add(root)
         javaSourcePath.addAll(findJavaSourceFiles(root))
 
-        return refresh()
+        startBackgroundResolution()
+        return false
+    }
+
+    private fun startBackgroundResolution() {
+        resolutionFuture.get()?.cancel(false)
+
+        resolutionState = ClassPathResolutionState.RESOLVING
+        LOG.info("Starting background classpath resolution")
+
+        val future = async.compute {
+            try {
+                refresh()
+                resolutionState = ClassPathResolutionState.READY
+                LOG.info("Classpath resolution completed")
+                onClassPathReady?.invoke()
+            } catch (e: Exception) {
+                LOG.error("Classpath resolution failed: {}", e.message)
+                resolutionState = ClassPathResolutionState.FAILED
+            }
+        }
+        resolutionFuture.set(future)
     }
 
     fun removeWorkspaceRoot(root: Path): Boolean {
