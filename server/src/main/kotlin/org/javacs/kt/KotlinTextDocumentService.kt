@@ -61,10 +61,10 @@ class KotlinTextDocumentService(
     }
     private val formattingService = FormattingService(config.formatting)
 
-    // Response caches for LSP operations
     private val definitionCache = LspResponseCache<Location?>()
     private val hoverCache = LspResponseCache<Hover?>()
     private val completionCache = LspResponseCache<CompletionList>()
+    private val referencesCache = LspResponseCache<List<Location>?>()
 
     var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
     val lintTodo = mutableSetOf<URI>()
@@ -134,7 +134,6 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                // Check cache first
                 hoverCache.get(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Hover cache hit")
                     return@supplyAsync cached
@@ -143,7 +142,6 @@ class KotlinTextDocumentService(
                 val (file, cursor) = recover(position, Recompile.NEVER) ?: return@supplyAsync null
                 val result = hoverAt(file, cursor)
 
-                // Store in cache (including null results to avoid repeated lookups)
                 hoverCache.put(uri, line, character, fileVersion, result)
 
                 result ?: noResult("No hover found at ${describePosition(position)}", null)
@@ -168,7 +166,6 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                // Check cache first
                 definitionCache.get(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Definition cache hit")
                     return@supplyAsync Either.forLeft(listOf(cached))
@@ -178,7 +175,6 @@ class KotlinTextDocumentService(
                     ?: return@supplyAsync Either.forLeft(emptyList())
                 val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
 
-                // Store in cache
                 result?.let { definitionCache.put(uri, line, character, fileVersion, it) }
 
                 result?.let(::listOf)
@@ -213,7 +209,6 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                // Check cache first
                 completionCache.get(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Completion cache hit with {} items", cached.items.size)
                     return@supplyAsync Either.forRight(cached)
@@ -223,7 +218,6 @@ class KotlinTextDocumentService(
                     ?: return@supplyAsync Either.forRight(CompletionList()) // TODO: Investigate when to recompile
                 val result = completions(file, cursor, sp.index, config.completion)
 
-                // Store in cache
                 completionCache.put(uri, line, character, fileVersion, result)
 
                 LOG.info("Found {} items", result.items.size)
@@ -288,22 +282,36 @@ class KotlinTextDocumentService(
 
     override fun didChange(params: DidChangeTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
-        // Invalidate caches for this file
         definitionCache.invalidate(uri)
         hoverCache.invalidate(uri)
         completionCache.invalidate(uri)
+        referencesCache.clear() // Clear all because any file change can affect cross-file references
         sf.edit(uri, params.textDocument.version, params.contentChanges)
         lintLater(uri)
     }
 
     override fun references(position: ReferenceParams): CompletableFuture<List<Location>?> =
         CompletableFuture.supplyAsync({
-            position.textDocument.filePath
+            val uri = parseURI(position.textDocument.uri)
+            val fileVersion = sf.getVersion(uri)
+            val line = position.position.line
+            val character = position.position.character
+
+            referencesCache.get(uri, line, character, fileVersion)?.let { cached ->
+                LOG.info("References cache hit with {} locations", cached.size)
+                return@supplyAsync cached
+            }
+
+            val result = position.textDocument.filePath
                 ?.let { file ->
-                    val content = sp.content(parseURI(position.textDocument.uri))
-                    val offset = offset(content, position.position.line, position.position.character)
-                    findReferences(file, offset, sp)
+                    val content = sp.content(uri)
+                    val cursorOffset = offset(content, line, character)
+                    findReferences(file, cursorOffset, sp)
                 }
+
+            referencesCache.put(uri, line, character, fileVersion, result)
+
+            result
         }, referencesExecutor)
 
     override fun semanticTokensFull(params: SemanticTokensParams) = async.compute {
