@@ -49,9 +49,6 @@ class KotlinTextDocumentService(
     private val definitionExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "kls-definition").apply { isDaemon = true }
     }
-    private val precompileExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "kls-precompile").apply { isDaemon = true }
-    }
     private val hoverExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "kls-hover").apply { isDaemon = true }
     }
@@ -202,15 +199,6 @@ class KotlinTextDocumentService(
         val uri = parseURI(params.textDocument.uri)
         sf.open(uri, params.textDocument.text, params.textDocument.version)
         lintNow(uri)
-
-        // Pre-compile in background so gd is fast on first use
-        precompileExecutor.submit {
-            try {
-                sp.latestCompiledVersion(uri)
-            } catch (e: Exception) {
-                LOG.debug("Pre-compile failed for {}: {}", describeURI(uri), e.message)
-            }
-        }
     }
 
     override fun didSave(params: DidSaveTextDocumentParams) {
@@ -369,7 +357,6 @@ class KotlinTextDocumentService(
         async.shutdown(awaitTermination)
         debounceLint.shutdown(awaitTermination)
         definitionExecutor.shutdown()
-        precompileExecutor.shutdown()
         hoverExecutor.shutdown()
         completionExecutor.shutdown()
         referencesExecutor.shutdown()
