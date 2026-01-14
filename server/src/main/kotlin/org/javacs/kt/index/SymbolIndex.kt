@@ -84,6 +84,10 @@ class PositionEntity(id: EntityID<Int>) : IntEntity(id) {
 class SymbolIndex(
     private val databaseService: DatabaseService
 ) {
+    private companion object {
+        const val PROGRESS_UPDATE_INTERVAL_MS = 100L
+    }
+
     private val db: Database by lazy {
         databaseService.db ?: Database.connect("jdbc:h2:mem:symbolindex;DB_CLOSE_DELAY=-1", "org.h2.Driver")
     }
@@ -113,13 +117,12 @@ class SymbolIndex(
 
                     // Phase 2: Process packages with progress updates
                     var lastUpdateTime = System.currentTimeMillis()
-                    val minUpdateIntervalMs = 100L // Throttle: max 10 updates/second
 
                     packages.forEachIndexed { index, pkgName ->
                         // Throttled progress update
                         val now = System.currentTimeMillis()
-                        if (now - lastUpdateTime >= minUpdateIntervalMs || index == 0 || index == packages.size - 1) {
-                            val percent = if (packages.isEmpty()) 100 else ((index + 1) * 100) / packages.size
+                        if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
+                            val percent = ((index + 1) * 100) / packages.size
                             val shortName = pkgName.shortName().asString().takeIf { it.isNotEmpty() } ?: "root"
                             progress.update(message = shortName, percent = percent)
                             lastUpdateTime = now
@@ -224,24 +227,6 @@ class SymbolIndex(
                 extensionReceiverType = it.extensionReceiverType?.let(::FqName)
             ) }
     }
-
-    private fun allDescriptors(module: ModuleDescriptor, exclusions: Sequence<DeclarationDescriptor>): Sequence<DeclarationDescriptor> = allPackages(module)
-        .map(module::getPackage)
-        .flatMap {
-            try {
-                it.memberScope.getContributedDescriptors(
-                    DescriptorKindFilter.ALL
-                ) { name -> !exclusions.any { declaration -> declaration.name == name } }
-            } catch (e: IllegalStateException) {
-                LOG.warn("Could not query descriptors in package $it")
-                emptyList()
-            }
-        }
-
-    private fun allPackages(module: ModuleDescriptor, pkgName: FqName = FqName.ROOT): Sequence<FqName> = module
-        .getSubPackagesOf(pkgName) { it.toString() != "META-INF" }
-        .asSequence()
-        .flatMap { sequenceOf(it) + allPackages(module, it) }
 
     /** Collects all packages into a list for counting and progress tracking. */
     private fun collectAllPackages(module: ModuleDescriptor): List<FqName> {
