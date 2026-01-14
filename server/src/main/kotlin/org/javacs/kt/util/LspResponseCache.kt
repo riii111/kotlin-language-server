@@ -17,7 +17,7 @@ class LspResponseCache<T>(
     )
 
     private val cache = object : LinkedHashMap<CacheKey, T>(maxSize, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableEntry<CacheKey, T>): Boolean = size > maxSize
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CacheKey, T>?): Boolean = size > maxSize
     }
 
     @Synchronized
