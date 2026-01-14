@@ -6,6 +6,7 @@ import org.javacs.kt.util.fileExtension
 import org.javacs.kt.util.filePath
 import org.javacs.kt.util.describeURI
 import org.javacs.kt.index.SymbolIndex
+import org.javacs.kt.index.JarScanner
 import org.javacs.kt.progress.Progress
 import com.intellij.lang.Language
 import org.javacs.kt.database.DatabaseService
@@ -171,28 +172,16 @@ class SourcePath(
         files.remove(uri)
     }
 
-    /**
-     * Get the latest content of a file
-     */
     fun content(uri: URI): String = sourceFile(uri).content
 
     fun parsedFile(uri: URI): KtFile = sourceFile(uri).apply { parseIfChanged() }.parsed!!
 
-    /**
-     * Compile the latest version of a file
-     */
     fun currentVersion(uri: URI): CompiledFile =
             sourceFile(uri).apply { compileIfChanged() }.prepareCompiledFile()
 
-    /**
-     * Return whatever is the most-recent already-compiled version of `file`
-     */
     fun latestCompiledVersion(uri: URI): CompiledFile =
             sourceFile(uri).prepareCompiledFile()
 
-    /**
-     * Compile changed files
-     */
     fun compileFiles(all: Collection<URI>): BindingContext {
         // Figure out what has changed
         val sources = all.map { files[it]!! }
@@ -263,9 +252,6 @@ class SourcePath(
         }
     }
 
-    /**
-     * Saves a file. This generates code for the file and deletes previously generated code for this file.
-     */
     fun save(uri: URI) {
         files[uri]?.let {
             if (!it.isScript) {
@@ -289,36 +275,28 @@ class SourcePath(
         files.keys.forEach { save(it) }
     }
 
-    /**
-     * Refreshes dependency indexes. Called on startup via lintAll().
-     * On startup, attempts to use persisted index if valid.
-     */
     fun refreshDependencyIndexes() {
         compileAllFiles()
 
         val module = files.values.firstOrNull { it.module != null }?.module
         if (module != null) {
-            refreshDependencyIndexes(module, skipIfValid = true)
+            val diff = cp.lastClassPathDiff
+            if (diff != null && diff.hasChanges) {
+                refreshDependencyIndexesIncrementally(diff)
+            } else {
+                refreshDependencyIndexes(module, skipIfValid = true)
+            }
         }
     }
 
-    /**
-     * Refreshes the indexes. If already done, refreshes only the declarations in the files that were changed.
-     */
     private fun refreshWorkspaceIndexes(oldFiles: List<SourceFile>, newFiles: List<SourceFile>) = indexAsync.execute {
         if (indexEnabled) {
             val oldDeclarations = getDeclarationDescriptors(oldFiles)
             val newDeclarations = getDeclarationDescriptors(newFiles)
-
-            // Index the new declarations in the Kotlin source files that were just compiled, removing the old ones
             index.updateIndexes(oldDeclarations, newDeclarations)
         }
     }
 
-    /**
-     * Refreshes the indexes. If already done, refreshes only the declarations in the files that were changed.
-     * When skipIfValid is true and a valid persisted index exists, skips rebuilding.
-     */
     private fun refreshDependencyIndexes(module: ModuleDescriptor, skipIfValid: Boolean = false) = indexAsync.execute {
         if (indexEnabled) {
             val declarations = getDeclarationDescriptors(files.values)
@@ -327,7 +305,29 @@ class SourcePath(
         }
     }
 
-    // Gets all the declaration descriptors for the collection of files
+    fun refreshDependencyIndexesIncrementally(diff: ClassPathDiff) = indexAsync.execute {
+        if (!indexEnabled) return@execute
+
+        val module = files.values.firstOrNull { it.module != null }?.module
+        if (module == null) {
+            LOG.warn("No module available for incremental indexing")
+            return@execute
+        }
+
+        val removedJars = diff.removed.map { it.compiledJar }
+        val addedJars = diff.added.map { it.compiledJar }
+
+        if (removedJars.isNotEmpty()) {
+            index.removeSymbolsFromJars(removedJars)
+        }
+
+        if (addedJars.isNotEmpty()) {
+            val jarScanner = JarScanner()
+            val packageToJarsMap = jarScanner.buildPackageToJarsMap(addedJars)
+            index.indexJars(addedJars, module, packageToJarsMap, jarScanner)
+        }
+    }
+
     private fun getDeclarationDescriptors(files: Collection<SourceFile>) =
         files.flatMap { file ->
             val compiledFile = file.compiledFile ?: file.parsed
@@ -341,9 +341,6 @@ class SourcePath(
             }
         }.asSequence()
 
-    /**
-     * Recompiles all source files that are initialized.
-     */
     fun refresh() {
         val initialized = files.values.any { it.parsed != null }
         if (initialized) {

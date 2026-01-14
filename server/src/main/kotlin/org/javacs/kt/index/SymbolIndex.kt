@@ -14,7 +14,9 @@ import org.javacs.kt.database.Ranges
 import org.javacs.kt.database.Positions
 import org.javacs.kt.database.SymbolIndexMetadata
 import org.javacs.kt.database.SymbolIndexMetadataEntity
+import org.javacs.kt.database.IndexedJars
 import org.javacs.kt.progress.Progress
+import java.nio.file.Path
 import org.jetbrains.exposed.dao.IntEntity
 import org.jetbrains.exposed.dao.IntEntityClass
 import org.jetbrains.exposed.dao.id.EntityID
@@ -326,6 +328,163 @@ class SymbolIndex(
         } catch (e: Exception) {
             LOG.error("Error while updating symbol index")
             LOG.printStackTrace(e)
+        }
+    }
+
+    fun removeSymbolsFromJars(jarPaths: Collection<Path>) {
+        if (jarPaths.isEmpty()) return
+
+        val started = System.currentTimeMillis()
+        LOG.info("Removing symbols from ${jarPaths.size} JARs...")
+
+        indexLock.writeLock().withLock {
+            transaction(db) {
+                val jarStrings = jarPaths.map { it.toString() }
+                val deletedCount = Symbols.deleteWhere { Symbols.sourceJar inList jarStrings }
+                IndexedJars.deleteWhere { IndexedJars.jarPath inList jarStrings }
+
+                val finished = System.currentTimeMillis()
+                LOG.info("Removed $deletedCount symbols from ${jarPaths.size} JARs in ${finished - started} ms")
+            }
+        }
+    }
+
+    fun indexJars(
+        jarPaths: Collection<Path>,
+        module: ModuleDescriptor,
+        packageToJarsMap: Map<String, Set<Path>>,
+        jarScanner: JarScanner,
+        cancellationToken: AtomicBoolean = AtomicBoolean(false)
+    ) {
+        if (jarPaths.isEmpty()) return
+
+        val alreadyIndexed = getIndexedJarPaths()
+        val jarsToIndex = jarPaths.filterNot { it in alreadyIndexed }
+        if (jarsToIndex.isEmpty()) {
+            LOG.info("All JARs already indexed, skipping")
+            return
+        }
+
+        val started = System.currentTimeMillis()
+        val jarSet = jarsToIndex.toSet()
+
+        val relevantPackages = packageToJarsMap
+            .filter { (_, jars) -> jars.any { it in jarSet } }
+            .keys
+
+        LOG.info("Indexing ${jarsToIndex.size} JARs (${jarPaths.size - jarsToIndex.size} already indexed) with ${relevantPackages.size} packages...")
+
+        var indexedSymbols = 0
+        val jarSymbolCounts = mutableMapOf<Path, Int>()
+
+        for (pkgName in relevantPackages) {
+            if (cancellationToken.get()) {
+                LOG.warn("Incremental indexing cancelled")
+                break
+            }
+
+            indexLock.writeLock().withLock {
+                transaction(db) {
+                    try {
+                        val pkg = module.getPackage(FqName.fromSegments(pkgName.split(".")))
+                        val descriptors = pkg.memberScope.getContributedDescriptors(DescriptorKindFilter.ALL) { true }
+
+                        for (descriptor in descriptors) {
+                            val sourceJar = determineSourceJar(descriptor, pkgName, packageToJarsMap, jarSet, jarScanner)
+                            if (sourceJar != null) {
+                                addDeclarationWithSource(descriptor, sourceJar)
+                                indexedSymbols++
+                                jarSymbolCounts[sourceJar] = (jarSymbolCounts[sourceJar] ?: 0) + 1
+                            }
+                        }
+                    } catch (e: Exception) {
+                        LOG.warn("Could not index package $pkgName: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        if (!cancellationToken.get()) {
+            indexLock.writeLock().withLock {
+                transaction(db) {
+                    val now = System.currentTimeMillis()
+                    for ((jar, count) in jarSymbolCounts) {
+                        IndexedJars.insert {
+                            it[jarPath] = jar.toString()
+                            it[indexedAt] = now
+                            it[symbolCount] = count
+                        }
+                    }
+
+                    val totalSymbolCount = countSymbols()
+                    if (isPersistent) {
+                        SymbolIndexMetadata.update {
+                            it[SymbolIndexMetadata.symbolCount] = totalSymbolCount
+                            it[indexedAt] = now
+                        }
+                    }
+                }
+            }
+
+            val finished = System.currentTimeMillis()
+            LOG.info("Indexed $indexedSymbols symbols from ${jarsToIndex.size} JARs in ${finished - started} ms")
+        }
+    }
+
+    private fun determineSourceJar(
+        descriptor: DeclarationDescriptor,
+        packageName: String,
+        packageToJarsMap: Map<String, Set<Path>>,
+        indexingJars: Set<Path>,
+        jarScanner: JarScanner
+    ): Path? {
+        val candidateJars = packageToJarsMap[packageName]?.intersect(indexingJars) ?: return null
+
+        if (candidateJars.size == 1) {
+            return candidateJars.first()
+        }
+
+        // A package can span multiple JARs (e.g., kotlin.collections in stdlib + coroutines)
+        val fqn = descriptor.fqNameSafe.asString()
+        for (jar in candidateJars) {
+            if (jarScanner.containsClass(jar, fqn)) {
+                return jar
+            }
+        }
+
+        return candidateJars.firstOrNull()
+    }
+
+    private fun addDeclarationWithSource(descriptor: DeclarationDescriptor, sourceJar: Path) {
+        val (descriptorFqn, extensionReceiverFqn) = getFqNames(descriptor)
+
+        if (validFqName(descriptorFqn) && (extensionReceiverFqn?.let { validFqName(it) } != false)) {
+            val fqn = descriptorFqn.toString()
+            val jarStr = sourceJar.toString()
+
+            val exists = Symbols.select {
+                (Symbols.fqName eq fqn) and (Symbols.sourceJar eq jarStr)
+            }.limit(1).count() > 0
+            if (exists) return
+
+            Symbols.insert {
+                it[fqName] = fqn
+                it[shortName] = descriptorFqn.shortName().toString()
+                it[kind] = descriptor.accept(ExtractSymbolKind, Unit).rawValue
+                it[visibility] = descriptor.accept(ExtractSymbolVisibility, Unit).rawValue
+                it[extensionReceiverType] = extensionReceiverFqn?.toString()
+                it[Symbols.sourceJar] = jarStr
+            }
+        }
+    }
+
+    fun getIndexedJarPaths(): Set<Path> {
+        return try {
+            transaction(db) {
+                IndexedJars.selectAll().map { Path.of(it[IndexedJars.jarPath]) }.toSet()
+            }
+        } catch (e: Exception) {
+            emptySet()
         }
     }
 
