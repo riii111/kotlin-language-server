@@ -49,8 +49,14 @@ class KotlinTextDocumentService(
     private val definitionExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "kls-definition").apply { isDaemon = true }
     }
-    private val precompileExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "kls-precompile").apply { isDaemon = true }
+    private val hoverExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "kls-hover").apply { isDaemon = true }
+    }
+    private val completionExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "kls-completion").apply { isDaemon = true }
+    }
+    private val referencesExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "kls-references").apply { isDaemon = true }
     }
     private val formattingService = FormattingService(config.formatting)
 
@@ -113,14 +119,14 @@ class KotlinTextDocumentService(
         provideHints(file, config.inlayHints)
     }
 
-    override fun hover(position: HoverParams): CompletableFuture<Hover?> = async.compute {
-        reportTime {
-            LOG.info("Hovering at {}", describePosition(position))
-
-            val (file, cursor) = recover(position, Recompile.NEVER) ?: return@compute null
-            hoverAt(file, cursor) ?: noResult("No hover found at ${describePosition(position)}", null)
-        }
-    }
+    override fun hover(position: HoverParams): CompletableFuture<Hover?> =
+        CompletableFuture.supplyAsync({
+            reportTime {
+                LOG.info("Hovering at {}", describePosition(position))
+                val (file, cursor) = recover(position, Recompile.NEVER) ?: return@supplyAsync null
+                hoverAt(file, cursor) ?: noResult("No hover found at ${describePosition(position)}", null)
+            }
+        }, hoverExecutor)
 
     override fun documentHighlight(position: DocumentHighlightParams): CompletableFuture<List<DocumentHighlight>> = async.compute {
         val (file, cursor) = recover(position.textDocument.uri, position.position, Recompile.NEVER) ?: return@compute emptyList()
@@ -161,17 +167,17 @@ class KotlinTextDocumentService(
         renameSymbol(file, cursor, sp, params.newName)
     }
 
-    override fun completion(position: CompletionParams): CompletableFuture<Either<List<CompletionItem>, CompletionList>> = async.compute {
-        reportTime {
-            LOG.info("Completing at {}", describePosition(position))
-
-            val (file, cursor) = recover(position, Recompile.NEVER) ?: return@compute Either.forRight(CompletionList()) // TODO: Investigate when to recompile
-            val completions = completions(file, cursor, sp.index, config.completion)
-            LOG.info("Found {} items", completions.items.size)
-
-            Either.forRight(completions)
-        }
-    }
+    override fun completion(position: CompletionParams): CompletableFuture<Either<List<CompletionItem>, CompletionList>> =
+        CompletableFuture.supplyAsync({
+            reportTime {
+                LOG.info("Completing at {}", describePosition(position))
+                val (file, cursor) = recover(position, Recompile.NEVER)
+                    ?: return@supplyAsync Either.forRight(CompletionList()) // TODO: Investigate when to recompile
+                val completions = completions(file, cursor, sp.index, config.completion)
+                LOG.info("Found {} items", completions.items.size)
+                Either.forRight(completions)
+            }
+        }, completionExecutor)
 
     override fun resolveCompletionItem(unresolved: CompletionItem): CompletableFuture<CompletionItem> {
         TODO("not implemented")
@@ -193,15 +199,6 @@ class KotlinTextDocumentService(
         val uri = parseURI(params.textDocument.uri)
         sf.open(uri, params.textDocument.text, params.textDocument.version)
         lintNow(uri)
-
-        // Pre-compile in background so gd is fast on first use
-        precompileExecutor.submit {
-            try {
-                sp.latestCompiledVersion(uri)
-            } catch (e: Exception) {
-                LOG.debug("Pre-compile failed for {}: {}", describeURI(uri), e.message)
-            }
-        }
     }
 
     override fun didSave(params: DidSaveTextDocumentParams) {
@@ -243,14 +240,15 @@ class KotlinTextDocumentService(
         lintLater(uri)
     }
 
-    override fun references(position: ReferenceParams) = async.compute {
-        position.textDocument.filePath
-            ?.let { file ->
-                val content = sp.content(parseURI(position.textDocument.uri))
-                val offset = offset(content, position.position.line, position.position.character)
-                findReferences(file, offset, sp)
-            }
-    }
+    override fun references(position: ReferenceParams): CompletableFuture<List<Location>?> =
+        CompletableFuture.supplyAsync({
+            position.textDocument.filePath
+                ?.let { file ->
+                    val content = sp.content(parseURI(position.textDocument.uri))
+                    val offset = offset(content, position.position.line, position.position.character)
+                    findReferences(file, offset, sp)
+                }
+        }, referencesExecutor)
 
     override fun semanticTokensFull(params: SemanticTokensParams) = async.compute {
         LOG.info("Full semantic tokens in {}", describeURI(params.textDocument.uri))
@@ -359,7 +357,9 @@ class KotlinTextDocumentService(
         async.shutdown(awaitTermination)
         debounceLint.shutdown(awaitTermination)
         definitionExecutor.shutdown()
-        precompileExecutor.shutdown()
+        hoverExecutor.shutdown()
+        completionExecutor.shutdown()
+        referencesExecutor.shutdown()
     }
 
     override fun close() {
