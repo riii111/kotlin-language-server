@@ -44,6 +44,7 @@ class KotlinLanguageServer(
         set(factory: Progress.Factory) {
             field = factory
             sourcePath.progressFactory = factory
+            classPath.progressFactory = factory
         }
 
     companion object {
@@ -116,6 +117,12 @@ class KotlinLanguageServer(
 
         val progress = params.workDoneToken?.let { LanguageClientProgress("Workspace folders", it, client) }
 
+        classPath.onClassPathReady = {
+            LOG.info("Classpath ready, refreshing source path and re-linting open files")
+            sourcePath.refresh()
+            textDocuments.lintAllOpenFiles()
+        }
+
         folders.forEachIndexed { i, folder ->
             LOG.info("Adding workspace folder {}", folder.name)
             val progressPrefix = "[${i + 1}/${folders.size}] ${folder.name ?: ""}"
@@ -126,11 +133,7 @@ class KotlinLanguageServer(
             sourceFiles.addWorkspaceRoot(root)
 
             progress?.update("$progressPrefix: Updating class path", progressPercent)
-            val refreshed = classPath.addWorkspaceRoot(root)
-            if (refreshed) {
-                progress?.update("$progressPrefix: Refreshing source path", progressPercent)
-                sourcePath.refresh()
-            }
+            classPath.addWorkspaceRoot(root)
         }
         progress?.close()
 

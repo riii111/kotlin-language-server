@@ -5,8 +5,12 @@ import org.javacs.kt.classpath.ClassPathResolver
 import org.javacs.kt.classpath.defaultClassPathResolver
 import org.javacs.kt.compiler.Compiler
 import org.javacs.kt.database.DatabaseService
+import org.javacs.kt.progress.Progress
 import org.javacs.kt.util.AsyncExecutor
 import java.io.Closeable
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import java.io.File
 import java.nio.file.FileSystems
 import java.nio.file.Files
@@ -17,6 +21,13 @@ data class ClassPathDiff(
     val removed: Set<ClassPathEntry>
 ) {
     val hasChanges: Boolean get() = added.isNotEmpty() || removed.isNotEmpty()
+}
+
+enum class ClassPathResolutionState {
+    PENDING,
+    RESOLVING,
+    READY,
+    FAILED
 }
 
 class CompilerClassPath(
@@ -57,6 +68,17 @@ class CompilerClassPath(
         private set
 
     private val async = AsyncExecutor()
+    private val resolutionFuture = AtomicReference<CompletableFuture<*>?>(null)
+
+    @Volatile
+    var resolutionState: ClassPathResolutionState = ClassPathResolutionState.PENDING
+        private set
+
+    val isReady: Boolean get() = resolutionState == ClassPathResolutionState.READY
+
+    var onClassPathReady: (() -> Unit)? = null
+
+    var progressFactory: Progress.Factory = Progress.Factory.None
 
     init {
         compiler.updateConfiguration(config)
@@ -155,7 +177,34 @@ class CompilerClassPath(
         workspaceRoots.add(root)
         javaSourcePath.addAll(findJavaSourceFiles(root))
 
-        return refresh()
+        startBackgroundResolution()
+        return false
+    }
+
+    @Synchronized
+    private fun startBackgroundResolution() {
+        val oldFuture = resolutionFuture.getAndSet(null)
+        oldFuture?.cancel(false)
+
+        resolutionState = ClassPathResolutionState.RESOLVING
+        LOG.info("Starting background classpath resolution")
+
+        val future = progressFactory.create("Resolving dependencies").thenApplyAsync { progress ->
+            try {
+                progress.update("Scanning build files...", 10)
+                refresh()
+                progress.update("Complete", 100)
+                resolutionState = ClassPathResolutionState.READY
+                LOG.info("Classpath resolution completed")
+                onClassPathReady?.invoke()
+            } catch (e: Exception) {
+                LOG.error("Classpath resolution failed", e)
+                resolutionState = ClassPathResolutionState.FAILED
+            } finally {
+                progress.close()
+            }
+        }
+        resolutionFuture.set(future)
     }
 
     fun removeWorkspaceRoot(root: Path): Boolean {
@@ -184,11 +233,15 @@ class CompilerClassPath(
     fun changedOnDisk(file: Path): Boolean {
         val buildScript = isBuildScript(file)
         val javaSource = isJavaSource(file)
-        if (buildScript || javaSource) {
-            return refresh(updateClassPath = buildScript, updateBuildScriptClassPath = false, updateJavaSourcePath = javaSource)
-        } else {
+
+        if (buildScript) {
+            LOG.info("Build script changed: {}, triggering background resolution", file)
+            startBackgroundResolution()
             return false
+        } else if (javaSource) {
+            return refresh(updateClassPath = false, updateBuildScriptClassPath = false, updateJavaSourcePath = true)
         }
+        return false
     }
 
     private fun isJavaSource(file: Path): Boolean = file.fileName.toString().endsWith(".java")
@@ -203,7 +256,13 @@ class CompilerClassPath(
             .toSet()
     }
 
+    fun waitForResolution(timeout: Long = 60, unit: TimeUnit = TimeUnit.SECONDS) {
+        resolutionFuture.get()?.get(timeout, unit)
+    }
+
     override fun close() {
+        resolutionFuture.get()?.cancel(true)
+        async.shutdown(awaitTermination = true)
         compiler.close()
         outputDirectory.delete()
     }

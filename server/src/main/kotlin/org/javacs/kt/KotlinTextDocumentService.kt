@@ -363,6 +363,20 @@ class KotlinTextDocumentService(
         }
     }
 
+    fun lintAllOpenFiles() {
+        val openFiles = sf.openFiles()
+        if (openFiles.isEmpty()) {
+            LOG.info("No open files to re-lint")
+            return
+        }
+
+        LOG.info("Re-linting {} open files after classpath ready", openFiles.size)
+        debounceLint.submitImmediately {
+            val context = sp.compileFiles(openFiles)
+            reportDiagnostics(openFiles, context.diagnostics)
+        }
+    }
+
     private fun clearLint(): List<URI> {
         val result = lintTodo.toList()
         lintTodo.clear()
@@ -380,6 +394,11 @@ class KotlinTextDocumentService(
     }
 
     private fun doLint(cancelCallback: () -> Boolean) {
+        if (!cp.isReady) {
+            LOG.info("Skipping lint - classpath not ready")
+            return
+        }
+
         LOG.info("Linting {}", describeURIs(lintTodo))
         val files = clearLint()
         val context = sp.compileFiles(files)
