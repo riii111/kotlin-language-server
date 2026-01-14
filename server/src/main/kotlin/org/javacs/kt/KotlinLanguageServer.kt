@@ -44,6 +44,7 @@ class KotlinLanguageServer(
         set(factory: Progress.Factory) {
             field = factory
             sourcePath.progressFactory = factory
+            classPath.progressFactory = factory
         }
 
     companion object {

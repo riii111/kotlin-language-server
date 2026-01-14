@@ -5,6 +5,7 @@ import org.javacs.kt.classpath.ClassPathResolver
 import org.javacs.kt.classpath.defaultClassPathResolver
 import org.javacs.kt.compiler.Compiler
 import org.javacs.kt.database.DatabaseService
+import org.javacs.kt.progress.Progress
 import org.javacs.kt.util.AsyncExecutor
 import java.io.Closeable
 import java.util.concurrent.CompletableFuture
@@ -75,6 +76,8 @@ class CompilerClassPath(
     val isReady: Boolean get() = resolutionState == ClassPathResolutionState.READY
 
     var onClassPathReady: (() -> Unit)? = null
+
+    var progressFactory: Progress.Factory = Progress.Factory.None
 
     init {
         compiler.updateConfiguration(config)
@@ -183,15 +186,19 @@ class CompilerClassPath(
         resolutionState = ClassPathResolutionState.RESOLVING
         LOG.info("Starting background classpath resolution")
 
-        val future = async.compute {
+        val future = progressFactory.create("Resolving dependencies").thenApplyAsync { progress ->
             try {
+                progress.update("Scanning build files...", 10)
                 refresh()
+                progress.update("Complete", 100)
                 resolutionState = ClassPathResolutionState.READY
                 LOG.info("Classpath resolution completed")
                 onClassPathReady?.invoke()
             } catch (e: Exception) {
                 LOG.error("Classpath resolution failed: {}", e.message)
                 resolutionState = ClassPathResolutionState.FAILED
+            } finally {
+                progress.close()
             }
         }
         resolutionFuture.set(future)
