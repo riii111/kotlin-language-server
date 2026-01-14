@@ -72,6 +72,7 @@ class SymbolIndex(
     private companion object {
         const val PROGRESS_UPDATE_INTERVAL_MS = 100L
         const val INDEX_QUERY_TIMEOUT_MS = 100L
+        const val DEFAULT_BATCH_SIZE = 50
     }
 
     private val db: Database by lazy {
@@ -163,11 +164,11 @@ class SymbolIndex(
         exclusions: Sequence<DeclarationDescriptor>,
         buildFileVersion: Long = 0L,
         skipIfValid: Boolean = false,
-        batchSize: Int = 50
+        batchSize: Int = DEFAULT_BATCH_SIZE
     ) {
         val effectiveBatchSize = if (batchSize > 0) batchSize else {
-            LOG.warn("Invalid batchSize $batchSize, using default of 50")
-            50
+            LOG.warn("Invalid batchSize $batchSize, using default of $DEFAULT_BATCH_SIZE")
+            DEFAULT_BATCH_SIZE
         }
 
         if (skipIfValid && buildFileVersion > 0 && isIndexValid(buildFileVersion)) {
@@ -210,13 +211,21 @@ class SymbolIndex(
                     return@thenApplyAsync
                 }
 
+                if (packages.isEmpty()) {
+                    LOG.info("No packages to index")
+                    progress.update(message = "Complete", percent = 100)
+                    return@thenApplyAsync
+                }
+
                 val batches = packages.chunked(effectiveBatchSize)
                 var processedPackages = 0
                 var lastUpdateTime = System.currentTimeMillis()
+                var cancelled = false
 
                 for ((batchIndex, batch) in batches.withIndex()) {
                     if (cancellationToken.get()) {
-                        LOG.info("Indexing cancelled at batch ${batchIndex + 1}/${batches.size}")
+                        LOG.warn("Indexing cancelled at batch ${batchIndex + 1}/${batches.size} - index is partial ($processedPackages/${packages.size} packages indexed)")
+                        cancelled = true
                         break
                     }
 
@@ -255,7 +264,7 @@ class SymbolIndex(
                     LOG.debug("Completed batch ${batchIndex + 1}/${batches.size} ($processedPackages/${packages.size} packages)")
                 }
 
-                if (!cancellationToken.get()) {
+                if (!cancelled) {
                     indexLock.writeLock().withLock {
                         transaction(db) {
                             val finished = System.currentTimeMillis()
