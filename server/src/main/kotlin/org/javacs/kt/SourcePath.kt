@@ -323,7 +323,7 @@ class SourcePath(
         if (indexEnabled) {
             val declarations = getDeclarationDescriptors(files.values)
             val buildFileVersion = cp.currentBuildFileVersion
-            index.refresh(module, declarations, buildFileVersion, skipIfValid)
+            index.refresh(module, declarations, buildFileVersion, skipIfValid, indexingConfig.batchSize)
         }
     }
 
