@@ -46,7 +46,14 @@ public data class CompilerConfiguration(
 
 public data class IndexingConfiguration(
     /** Whether an index of global symbols should be built in the background. */
-    var enabled: Boolean = true
+    var enabled: Boolean = true,
+    /**
+     * Number of packages to process per batch during indexing.
+     * Smaller values reduce memory pressure but increase transaction overhead.
+     * Larger values improve throughput but may cause longer lock hold times.
+     * Recommended range: 25-100 for most projects.
+     */
+    var batchSize: Int = 50
 )
 
 public data class ExternalSourcesConfiguration(
