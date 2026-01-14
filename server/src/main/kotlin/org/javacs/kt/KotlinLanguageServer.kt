@@ -134,7 +134,8 @@ class KotlinLanguageServer(
         }
         progress?.close()
 
-        textDocuments.lintAll()
+        // Disabled: compile on-demand when files are opened instead
+        // textDocuments.lintAll()
 
         val serverInfo = ServerInfo("Kotlin Language Server", VERSION)
 
