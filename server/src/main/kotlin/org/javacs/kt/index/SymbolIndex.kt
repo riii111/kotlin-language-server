@@ -8,43 +8,19 @@ import org.jetbrains.kotlin.resolve.descriptorUtil.fqNameSafe
 import org.jetbrains.kotlin.name.FqName
 import org.javacs.kt.LOG
 import org.javacs.kt.database.DatabaseService
+import org.javacs.kt.database.Symbols
+import org.javacs.kt.database.Locations
+import org.javacs.kt.database.Ranges
+import org.javacs.kt.database.Positions
 import org.javacs.kt.progress.Progress
 import org.jetbrains.exposed.dao.IntEntity
 import org.jetbrains.exposed.dao.IntEntityClass
 import org.jetbrains.exposed.dao.id.EntityID
-import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.*
 import kotlin.sequences.Sequence
 
 private const val MAX_FQNAME_LENGTH = 255
 private const val MAX_SHORT_NAME_LENGTH = 80
-private const val MAX_URI_LENGTH = 511
-
-private object Symbols : IntIdTable() {
-    val fqName = varchar("fqname", length = MAX_FQNAME_LENGTH).index()
-    val shortName = varchar("shortname", length = MAX_SHORT_NAME_LENGTH)
-    val kind = integer("kind")
-    val visibility = integer("visibility")
-    val extensionReceiverType = varchar("extensionreceivertype", length = MAX_FQNAME_LENGTH).nullable()
-    val location = optReference("location", Locations)
-
-    val byShortName = index("symbol_shortname_index", false, shortName)
-}
-
-private object Locations : IntIdTable() {
-    val uri = varchar("uri", length = MAX_URI_LENGTH)
-    val range = reference("range", Ranges)
-}
-
-private object Ranges : IntIdTable() {
-    val start = reference("start", Positions)
-    val end = reference("end", Positions)
-}
-
-private object Positions : IntIdTable() {
-    val line = integer("line")
-    val character = integer("character")
-}
 
 class SymbolEntity(id: EntityID<Int>) : IntEntity(id) {
     companion object : IntEntityClass<SymbolEntity>(Symbols)
@@ -80,6 +56,8 @@ class PositionEntity(id: EntityID<Int>) : IntEntity(id) {
 
 /**
  * A global view of all available symbols across all packages.
+ * Uses SQLite for persistence when storagePath is configured,
+ * otherwise falls back to H2 in-memory database.
  */
 class SymbolIndex(
     private val databaseService: DatabaseService
@@ -89,16 +67,20 @@ class SymbolIndex(
     }
 
     private val db: Database by lazy {
-        databaseService.db ?: Database.connect("jdbc:h2:mem:symbolindex;DB_CLOSE_DELAY=-1", "org.h2.Driver")
-    }
-
-    var progressFactory: Progress.Factory = Progress.Factory.None
-
-    init {
-        transaction(db) {
-            SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions)
+        databaseService.db ?: Database.connect("jdbc:h2:mem:symbolindex;DB_CLOSE_DELAY=-1", "org.h2.Driver").also {
+            // Create tables for in-memory database
+            transaction(it) {
+                SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions)
+            }
+            LOG.info("Using in-memory H2 database for symbol index (no storagePath configured)")
         }
     }
+
+    /** Whether the index is persisted to disk (SQLite) or in-memory (H2) */
+    val isPersistent: Boolean
+        get() = databaseService.db != null
+
+    var progressFactory: Progress.Factory = Progress.Factory.None
 
     /** Rebuilds the entire index. May take a while. */
     fun refresh(module: ModuleDescriptor, exclusions: Sequence<DeclarationDescriptor>) {

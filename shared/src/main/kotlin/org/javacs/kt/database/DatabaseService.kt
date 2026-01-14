@@ -23,10 +23,41 @@ class DatabaseMetadataEntity(id: EntityID<Int>) : IntEntity(id) {
     var version by DatabaseMetadata.version
 }
 
+// Symbol index table definitions
+private const val MAX_FQNAME_LENGTH = 255
+private const val MAX_SHORT_NAME_LENGTH = 80
+private const val MAX_URI_LENGTH = 511
+
+object Symbols : IntIdTable() {
+    val fqName = varchar("fqname", length = MAX_FQNAME_LENGTH).index()
+    val shortName = varchar("shortname", length = MAX_SHORT_NAME_LENGTH)
+    val kind = integer("kind")
+    val visibility = integer("visibility")
+    val extensionReceiverType = varchar("extensionreceivertype", length = MAX_FQNAME_LENGTH).nullable()
+    val location = optReference("location", Locations)
+
+    val byShortName = index("symbol_shortname_index", false, shortName)
+}
+
+object Locations : IntIdTable() {
+    val uri = varchar("uri", length = MAX_URI_LENGTH)
+    val range = reference("range", Ranges)
+}
+
+object Ranges : IntIdTable() {
+    val start = reference("start", Positions)
+    val end = reference("end", Positions)
+}
+
+object Positions : IntIdTable() {
+    val line = integer("line")
+    val character = integer("character")
+}
+
 class DatabaseService {
 
     companion object {
-        const val DB_VERSION = 4
+        const val DB_VERSION = 5
         const val DB_FILENAME = "kls_database.db"
     }
 
@@ -36,7 +67,13 @@ class DatabaseService {
     fun setup(storagePath: Path?) {
         db = getDbFromFile(storagePath)
 
-        val currentVersion = transaction(db) {
+        val database = db
+        if (database == null) {
+            LOG.info("No storagePath configured, using in-memory database for symbol index")
+            return
+        }
+
+        val currentVersion = transaction(database) {
             SchemaUtils.createMissingTablesAndColumns(DatabaseMetadata)
 
             DatabaseMetadataEntity.all().firstOrNull()?.version ?: 0
@@ -56,6 +93,14 @@ class DatabaseService {
             }
         } else {
             LOG.info("Database has the correct version $currentVersion and will be used as-is")
+        }
+
+        // Create symbol index tables
+        db?.let { dbInstance ->
+            transaction(dbInstance) {
+                SchemaUtils.createMissingTablesAndColumns(Symbols, Locations, Ranges, Positions)
+            }
+            LOG.info("Symbol index tables initialized in SQLite")
         }
     }
 
