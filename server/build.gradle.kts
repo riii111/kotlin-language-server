@@ -20,8 +20,8 @@ application {
     description = "Code completions, diagnostics and more for Kotlin"
     applicationDefaultJvmArgs = listOf(
         "-DkotlinLanguageServer.version=$version",
-        "-Xms256m",
-        "-Xmx3072m",  // 3GB heap required for large projects to avoid OOM during compilation
+        "-Xms512m",
+        "-Xmx8192m",  // 8GB heap for large monorepo projects
         "-XX:+UseG1GC",
         "-XX:+UseStringDeduplication"
     )
