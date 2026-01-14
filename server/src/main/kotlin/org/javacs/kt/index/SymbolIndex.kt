@@ -19,6 +19,11 @@ import org.jetbrains.exposed.dao.IntEntity
 import org.jetbrains.exposed.dao.IntEntityClass
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.*
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.withLock
 import kotlin.sequences.Sequence
 
 private const val MAX_FQNAME_LENGTH = 255
@@ -66,6 +71,7 @@ class SymbolIndex(
 ) {
     private companion object {
         const val PROGRESS_UPDATE_INTERVAL_MS = 100L
+        const val INDEX_QUERY_TIMEOUT_MS = 100L
     }
 
     private val db: Database by lazy {
@@ -76,6 +82,19 @@ class SymbolIndex(
             LOG.info("Using in-memory H2 database for symbol index (no storagePath configured)")
         }
     }
+
+    private val indexLock = ReentrantReadWriteLock()
+
+    @Volatile
+    private var currentRefreshTask: CompletableFuture<*>? = null
+
+    @Volatile
+    private var currentCancellationToken: AtomicBoolean? = null
+
+    /** Indicates whether a full index refresh is currently in progress. */
+    @Volatile
+    var isIndexing: Boolean = false
+        private set
 
     /** Whether the index is persisted to disk (SQLite) or in-memory (H2) */
     val isPersistent: Boolean
@@ -141,60 +160,93 @@ class SymbolIndex(
             return
         }
 
+        cancelCurrentRefresh()
+
+        val cancellationToken = AtomicBoolean(false)
+        currentCancellationToken = cancellationToken
+        isIndexing = true
+
         val started = System.currentTimeMillis()
         LOG.info("Updating full symbol index...")
 
-        progressFactory.create("Indexing").thenApplyAsync { progress ->
+        currentRefreshTask = progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
                 val packages = collectAllPackages(module)
                 LOG.info("Found ${packages.size} packages to index")
 
-                transaction(db) {
-                    clearAllSymbolTables()
+                if (cancellationToken.get()) {
+                    LOG.info("Indexing cancelled before starting")
+                    return@thenApplyAsync
+                }
 
-                    var lastUpdateTime = System.currentTimeMillis()
-
-                    packages.forEachIndexed { index, pkgName ->
-                        val now = System.currentTimeMillis()
-                        if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
-                            val percent = ((index + 1) * 100) / packages.size
-                            val shortName = pkgName.shortName().asString().takeIf { it.isNotEmpty() } ?: "root"
-                            progress.update(message = shortName, percent = percent)
-                            lastUpdateTime = now
+                indexLock.writeLock().withLock {
+                    transaction(db) {
+                        // Must check before clearAllSymbolTables() to avoid leaving index empty on cancellation
+                        if (cancellationToken.get()) {
+                            LOG.info("Indexing cancelled before deletion")
+                            return@transaction
                         }
 
-                        val pkg = module.getPackage(pkgName)
-                        try {
-                            val descriptors = pkg.memberScope.getContributedDescriptors(
-                                DescriptorKindFilter.ALL
-                            ) { name -> !exclusions.any { declaration -> declaration.name == name } }
-                            addDeclarations(descriptors.asSequence())
-                        } catch (e: IllegalStateException) {
-                            LOG.warn("Could not query descriptors in package $pkgName")
-                        }
-                    }
+                        clearAllSymbolTables()
 
-                    val finished = System.currentTimeMillis()
-                    val symbolCount = countSymbols()
-                    LOG.info("Updated full symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
+                        var lastUpdateTime = System.currentTimeMillis()
 
-                    if (buildFileVersion > 0 && isPersistent) {
-                        SymbolIndexMetadata.deleteAll()
-                        SymbolIndexMetadataEntity.new {
-                            this.buildFileVersion = buildFileVersion
-                            this.indexedAt = System.currentTimeMillis()
-                            this.symbolCount = symbolCount
+                        for ((index, pkgName) in packages.withIndex()) {
+                            if (cancellationToken.get()) {
+                                LOG.info("Indexing cancelled at package $index/${packages.size}")
+                                return@transaction
+                            }
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
+                                val percent = ((index + 1) * 100) / packages.size
+                                val shortName = pkgName.shortName().asString().takeIf { it.isNotEmpty() } ?: "root"
+                                progress.update(message = shortName, percent = percent)
+                                lastUpdateTime = now
+                            }
+
+                            val pkg = module.getPackage(pkgName)
+                            try {
+                                val descriptors = pkg.memberScope.getContributedDescriptors(
+                                    DescriptorKindFilter.ALL
+                                ) { name -> !exclusions.any { declaration -> declaration.name == name } }
+                                addDeclarations(descriptors.asSequence())
+                            } catch (e: IllegalStateException) {
+                                LOG.warn("Could not query descriptors in package $pkgName")
+                            }
                         }
-                        LOG.debug("Symbol index metadata updated: buildFileVersion=$buildFileVersion, symbolCount=$symbolCount")
+
+                        if (!cancellationToken.get()) {
+                            val finished = System.currentTimeMillis()
+                            val symbolCount = countSymbols()
+                            LOG.info("Updated full symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
+
+                            if (buildFileVersion > 0 && isPersistent) {
+                                SymbolIndexMetadata.deleteAll()
+                                SymbolIndexMetadataEntity.new {
+                                    this.buildFileVersion = buildFileVersion
+                                    this.indexedAt = System.currentTimeMillis()
+                                    this.symbolCount = symbolCount
+                                }
+                                LOG.debug("Symbol index metadata updated: buildFileVersion=$buildFileVersion, symbolCount=$symbolCount")
+                            }
+                        }
                     }
                 }
             } catch (e: Exception) {
                 LOG.error("Error while updating symbol index")
                 LOG.printStackTrace(e)
+            } finally {
+                isIndexing = false
+                progress.close()
             }
-
-            progress.close()
         }
+    }
+
+    /** Cancels the current refresh task if one is running. */
+    fun cancelCurrentRefresh() {
+        currentCancellationToken?.set(true)
+        currentRefreshTask?.cancel(false)
     }
 
     fun updateIndexes(remove: Sequence<DeclarationDescriptor>, add: Sequence<DeclarationDescriptor>) {
@@ -202,19 +254,21 @@ class SymbolIndex(
         LOG.info("Updating symbol index...")
 
         try {
-            transaction(db) {
-                removeDeclarations(remove)
-                addDeclarations(add)
+            indexLock.writeLock().withLock {
+                transaction(db) {
+                    removeDeclarations(remove)
+                    addDeclarations(add)
 
-                val finished = System.currentTimeMillis()
-                val symbolCount = countSymbols()
-                LOG.info("Updated symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
+                    val finished = System.currentTimeMillis()
+                    val symbolCount = countSymbols()
+                    LOG.info("Updated symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
 
-                if (isPersistent) {
-                    val existing = SymbolIndexMetadataEntity.all().firstOrNull()
-                    if (existing != null) {
-                        existing.symbolCount = symbolCount
-                        existing.indexedAt = System.currentTimeMillis()
+                    if (isPersistent) {
+                        val existing = SymbolIndexMetadataEntity.all().firstOrNull()
+                        if (existing != null) {
+                            existing.symbolCount = symbolCount
+                            existing.indexedAt = System.currentTimeMillis()
+                        }
                     }
                 }
             }
@@ -265,18 +319,42 @@ class SymbolIndex(
         fqName.toString().length <= MAX_FQNAME_LENGTH
             && fqName.shortName().toString().length <= MAX_SHORT_NAME_LENGTH
 
-    fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%"): List<Symbol> = transaction(db) {
-        // TODO: Extension completion currently only works if the receiver matches exactly,
-        //       ideally this should work with subtypes as well
-        SymbolEntity.find {
-            (Symbols.shortName like "$prefix$suffix") and (Symbols.extensionReceiverType eq receiverType?.toString())
-        }.limit(limit)
-            .map { Symbol(
-                fqName = FqName(it.fqName),
-                kind = Symbol.Kind.fromRaw(it.kind),
-                visibility = Symbol.Visibility.fromRaw(it.visibility),
-                extensionReceiverType = it.extensionReceiverType?.let(::FqName)
-            ) }
+    fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%"): List<Symbol> {
+        if (isIndexing) {
+            LOG.debug("Index query while indexing is in progress, results may be incomplete")
+        }
+
+        val readLock = indexLock.readLock()
+        val lockAcquired = try {
+            readLock.tryLock(INDEX_QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            LOG.warn("Index query interrupted while waiting for lock")
+            return emptyList()
+        }
+
+        if (!lockAcquired) {
+            LOG.info("Index query timed out while waiting for lock, returning empty result (graceful degradation)")
+            return emptyList()
+        }
+
+        try {
+            return transaction(db) {
+                // TODO: Extension completion currently only works if the receiver matches exactly,
+                //       ideally this should work with subtypes as well
+                SymbolEntity.find {
+                    (Symbols.shortName like "$prefix$suffix") and (Symbols.extensionReceiverType eq receiverType?.toString())
+                }.limit(limit)
+                    .map { Symbol(
+                        fqName = FqName(it.fqName),
+                        kind = Symbol.Kind.fromRaw(it.kind),
+                        visibility = Symbol.Visibility.fromRaw(it.visibility),
+                        extensionReceiverType = it.extensionReceiverType?.let(::FqName)
+                    ) }
+            }
+        } finally {
+            readLock.unlock()
+        }
     }
 
     private fun collectAllPackages(module: ModuleDescriptor): List<FqName> {
