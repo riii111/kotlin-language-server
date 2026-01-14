@@ -153,8 +153,18 @@ class SymbolIndex(
         Positions.deleteAll()
     }
 
-    /** Rebuilds the entire index. May take a while. */
-    fun refresh(module: ModuleDescriptor, exclusions: Sequence<DeclarationDescriptor>, buildFileVersion: Long = 0L, skipIfValid: Boolean = false) {
+    /**
+     * Rebuilds the entire index using batch processing.
+     * Processes packages in batches to reduce memory pressure and allow
+     * queries to access partial results during indexing.
+     */
+    fun refresh(
+        module: ModuleDescriptor,
+        exclusions: Sequence<DeclarationDescriptor>,
+        buildFileVersion: Long = 0L,
+        skipIfValid: Boolean = false,
+        batchSize: Int = 50
+    ) {
         if (skipIfValid && buildFileVersion > 0 && isIndexValid(buildFileVersion)) {
             LOG.info("Skipping index rebuild - persisted index is valid")
             return
@@ -167,7 +177,7 @@ class SymbolIndex(
         isIndexing = true
 
         val started = System.currentTimeMillis()
-        LOG.info("Updating full symbol index...")
+        LOG.info("Updating full symbol index with batch size $batchSize...")
 
         currentRefreshTask = progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
@@ -179,44 +189,70 @@ class SymbolIndex(
                     return@thenApplyAsync
                 }
 
-                indexLock.writeLock().withLock {
+                val cleared = indexLock.writeLock().withLock {
                     transaction(db) {
-                        // Must check before clearAllSymbolTables() to avoid leaving index empty on cancellation
                         if (cancellationToken.get()) {
                             LOG.info("Indexing cancelled before deletion")
-                            return@transaction
+                            false
+                        } else {
+                            clearAllSymbolTables()
+                            true
                         }
+                    }
+                }
 
-                        clearAllSymbolTables()
+                if (!cleared) {
+                    return@thenApplyAsync
+                }
 
-                        var lastUpdateTime = System.currentTimeMillis()
+                val batches = packages.chunked(batchSize)
+                var processedPackages = 0
+                var lastUpdateTime = System.currentTimeMillis()
 
-                        for ((index, pkgName) in packages.withIndex()) {
-                            if (cancellationToken.get()) {
-                                LOG.info("Indexing cancelled at package $index/${packages.size}")
-                                return@transaction
-                            }
+                for ((batchIndex, batch) in batches.withIndex()) {
+                    if (cancellationToken.get()) {
+                        LOG.info("Indexing cancelled at batch ${batchIndex + 1}/${batches.size}")
+                        break
+                    }
 
-                            val now = System.currentTimeMillis()
-                            if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
-                                val percent = ((index + 1) * 100) / packages.size
-                                val shortName = pkgName.shortName().asString().takeIf { it.isNotEmpty() } ?: "root"
-                                progress.update(message = shortName, percent = percent)
-                                lastUpdateTime = now
-                            }
+                    // Release lock between batches to allow queries during indexing
+                    indexLock.writeLock().withLock {
+                        transaction(db) {
+                            for (pkgName in batch) {
+                                if (cancellationToken.get()) {
+                                    LOG.info("Indexing cancelled during batch ${batchIndex + 1}")
+                                    return@transaction
+                                }
 
-                            val pkg = module.getPackage(pkgName)
-                            try {
-                                val descriptors = pkg.memberScope.getContributedDescriptors(
-                                    DescriptorKindFilter.ALL
-                                ) { name -> !exclusions.any { declaration -> declaration.name == name } }
-                                addDeclarations(descriptors.asSequence())
-                            } catch (e: IllegalStateException) {
-                                LOG.warn("Could not query descriptors in package $pkgName")
+                                val pkg = module.getPackage(pkgName)
+                                try {
+                                    val descriptors = pkg.memberScope.getContributedDescriptors(
+                                        DescriptorKindFilter.ALL
+                                    ) { name -> !exclusions.any { declaration -> declaration.name == name } }
+                                    addDeclarations(descriptors.asSequence())
+                                } catch (e: IllegalStateException) {
+                                    LOG.warn("Could not query descriptors in package $pkgName")
+                                }
                             }
                         }
+                    }
 
-                        if (!cancellationToken.get()) {
+                    processedPackages += batch.size
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || batchIndex == 0 || batchIndex == batches.size - 1) {
+                        val percent = (processedPackages * 100) / packages.size
+                        val batchInfo = "Batch ${batchIndex + 1}/${batches.size}"
+                        progress.update(message = batchInfo, percent = percent)
+                        lastUpdateTime = now
+                    }
+
+                    LOG.debug("Completed batch ${batchIndex + 1}/${batches.size} ($processedPackages/${packages.size} packages)")
+                }
+
+                if (!cancellationToken.get()) {
+                    indexLock.writeLock().withLock {
+                        transaction(db) {
                             val finished = System.currentTimeMillis()
                             val symbolCount = countSymbols()
                             LOG.info("Updated full symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
