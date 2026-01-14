@@ -134,11 +134,9 @@ class SymbolIndex(
 
         currentRefreshTask = progressFactory.create("Indexing").thenApplyAsync { progress ->
             try {
-                // Phase 1: Collect all packages for progress tracking
                 val packages = collectAllPackages(module)
                 LOG.info("Found ${packages.size} packages to index")
 
-                // Check for cancellation before acquiring lock
                 if (cancellationToken.get()) {
                     LOG.info("Indexing cancelled before starting")
                     return@thenApplyAsync
@@ -146,20 +144,22 @@ class SymbolIndex(
 
                 indexLock.writeLock().withLock {
                     transaction(db) {
-                        // Remove everything first.
+                        // Must check before deleteAll() to avoid leaving index empty on cancellation
+                        if (cancellationToken.get()) {
+                            LOG.info("Indexing cancelled before deletion")
+                            return@transaction
+                        }
+
                         Symbols.deleteAll()
 
-                        // Phase 2: Process packages with progress updates
                         var lastUpdateTime = System.currentTimeMillis()
 
                         for ((index, pkgName) in packages.withIndex()) {
-                            // Check for cancellation at each package
                             if (cancellationToken.get()) {
                                 LOG.info("Indexing cancelled at package $index/${packages.size}")
                                 return@transaction
                             }
 
-                            // Throttled progress update
                             val now = System.currentTimeMillis()
                             if (now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS || index == 0 || index == packages.size - 1) {
                                 val percent = ((index + 1) * 100) / packages.size
@@ -168,7 +168,6 @@ class SymbolIndex(
                                 lastUpdateTime = now
                             }
 
-                            // Index descriptors from this package
                             val pkg = module.getPackage(pkgName)
                             try {
                                 val descriptors = pkg.memberScope.getContributedDescriptors(
