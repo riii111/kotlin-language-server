@@ -31,6 +31,7 @@ class CompilerClassPath(
     val javaHome: String? = System.getProperty("java.home", null)
 
     // Cached resolver to avoid expensive re-creation on every access
+    @Volatile
     private var cachedResolver: ClassPathResolver? = null
 
     /** Returns the current build file version (max timestamp of all build files) */

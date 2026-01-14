@@ -296,7 +296,7 @@ class SourcePath(
     fun refreshDependencyIndexes() {
         compileAllFiles()
 
-        val module = files.values.first { it.module != null }.module
+        val module = files.values.firstOrNull { it.module != null }?.module
         if (module != null) {
             // On initial load, try to skip rebuilding if persisted index is valid
             refreshDependencyIndexes(module, skipIfValid = true)
