@@ -280,7 +280,12 @@ class SourcePath(
 
         val module = files.values.firstOrNull { it.module != null }?.module
         if (module != null) {
-            refreshDependencyIndexes(module, skipIfValid = true)
+            val diff = cp.lastClassPathDiff
+            if (diff != null && diff.hasChanges) {
+                refreshDependencyIndexesIncrementally(diff)
+            } else {
+                refreshDependencyIndexes(module, skipIfValid = true)
+            }
         }
     }
 

@@ -74,14 +74,6 @@ object IndexedJars : IntIdTable() {
     val symbolCount = integer("symbolcount")
 }
 
-class IndexedJarEntity(id: EntityID<Int>) : IntEntity(id) {
-    companion object : IntEntityClass<IndexedJarEntity>(IndexedJars)
-
-    var jarPath by IndexedJars.jarPath
-    var indexedAt by IndexedJars.indexedAt
-    var symbolCount by IndexedJars.symbolCount
-}
-
 class DatabaseService {
 
     companion object {

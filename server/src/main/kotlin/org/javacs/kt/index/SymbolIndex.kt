@@ -358,14 +358,21 @@ class SymbolIndex(
     ) {
         if (jarPaths.isEmpty()) return
 
+        val alreadyIndexed = getIndexedJarPaths()
+        val jarsToIndex = jarPaths.filterNot { it in alreadyIndexed }
+        if (jarsToIndex.isEmpty()) {
+            LOG.info("All JARs already indexed, skipping")
+            return
+        }
+
         val started = System.currentTimeMillis()
-        val jarSet = jarPaths.toSet()
+        val jarSet = jarsToIndex.toSet()
 
         val relevantPackages = packageToJarsMap
             .filter { (_, jars) -> jars.any { it in jarSet } }
             .keys
 
-        LOG.info("Indexing ${jarPaths.size} JARs with ${relevantPackages.size} packages...")
+        LOG.info("Indexing ${jarsToIndex.size} JARs (${jarPaths.size - jarsToIndex.size} already indexed) with ${relevantPackages.size} packages...")
 
         var indexedSymbols = 0
         val jarSymbolCounts = mutableMapOf<Path, Int>()
@@ -420,7 +427,7 @@ class SymbolIndex(
             }
 
             val finished = System.currentTimeMillis()
-            LOG.info("Indexed $indexedSymbols symbols from ${jarPaths.size} JARs in ${finished - started} ms")
+            LOG.info("Indexed $indexedSymbols symbols from ${jarsToIndex.size} JARs in ${finished - started} ms")
         }
     }
 
@@ -452,13 +459,21 @@ class SymbolIndex(
         val (descriptorFqn, extensionReceiverFqn) = getFqNames(descriptor)
 
         if (validFqName(descriptorFqn) && (extensionReceiverFqn?.let { validFqName(it) } != false)) {
+            val fqn = descriptorFqn.toString()
+            val jarStr = sourceJar.toString()
+
+            val exists = Symbols.select {
+                (Symbols.fqName eq fqn) and (Symbols.sourceJar eq jarStr)
+            }.limit(1).count() > 0
+            if (exists) return
+
             Symbols.insert {
-                it[fqName] = descriptorFqn.toString()
+                it[fqName] = fqn
                 it[shortName] = descriptorFqn.shortName().toString()
                 it[kind] = descriptor.accept(ExtractSymbolKind, Unit).rawValue
                 it[visibility] = descriptor.accept(ExtractSymbolVisibility, Unit).rawValue
                 it[extensionReceiverType] = extensionReceiverFqn?.toString()
-                it[Symbols.sourceJar] = sourceJar.toString()
+                it[Symbols.sourceJar] = jarStr
             }
         }
     }

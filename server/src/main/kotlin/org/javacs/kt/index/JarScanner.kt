@@ -5,24 +5,34 @@ import java.nio.file.Path
 import java.util.jar.JarFile
 
 class JarScanner {
+    private val jarEntriesCache = mutableMapOf<Path, Set<String>>()
+
+    private fun getJarEntries(jarPath: Path): Set<String> {
+        return jarEntriesCache.getOrPut(jarPath) {
+            try {
+                JarFile(jarPath.toFile()).use { jar ->
+                    jar.entries().asSequence()
+                        .filter { !it.isDirectory && it.name.endsWith(".class") }
+                        .map { it.name }
+                        .toSet()
+                }
+            } catch (e: Exception) {
+                LOG.warn("Failed to read JAR entries: {} - {}", jarPath, e.message)
+                emptySet()
+            }
+        }
+    }
 
     fun scanPackages(jarPath: Path): Set<String> {
-        return try {
-            JarFile(jarPath.toFile()).use { jar ->
-                jar.entries().asSequence()
-                    .filter { !it.isDirectory && it.name.endsWith(".class") && !it.name.contains("module-info") }
-                    .map { entry ->
-                        val className = entry.name.removeSuffix(".class").replace("/", ".")
-                        val lastDot = className.lastIndexOf('.')
-                        if (lastDot > 0) className.substring(0, lastDot) else ""
-                    }
-                    .filter { it.isNotEmpty() && !it.startsWith("META-INF") }
-                    .toSet()
+        return getJarEntries(jarPath)
+            .filter { !it.contains("module-info") }
+            .map { entry ->
+                val className = entry.removeSuffix(".class").replace("/", ".")
+                val lastDot = className.lastIndexOf('.')
+                if (lastDot > 0) className.substring(0, lastDot) else ""
             }
-        } catch (e: Exception) {
-            LOG.warn("Failed to scan JAR: {} - {}", jarPath, e.message)
-            emptySet()
-        }
+            .filter { it.isNotEmpty() && !it.startsWith("META-INF") }
+            .toSet()
     }
 
     // A package can span multiple JARs (e.g., kotlin.collections in stdlib + coroutines)
@@ -38,12 +48,6 @@ class JarScanner {
 
     fun containsClass(jarPath: Path, fqClassName: String): Boolean {
         val classFilePath = fqClassName.replace(".", "/") + ".class"
-        return try {
-            JarFile(jarPath.toFile()).use { jar ->
-                jar.getEntry(classFilePath) != null
-            }
-        } catch (e: Exception) {
-            false
-        }
+        return classFilePath in getJarEntries(jarPath)
     }
 }
