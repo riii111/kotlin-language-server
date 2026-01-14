@@ -212,17 +212,36 @@ class SymbolIndex(
         LOG.info("Updating symbol index...")
 
         try {
-            transaction(db) {
+            val symbolCount = transaction(db) {
                 removeDeclarations(remove)
                 addDeclarations(add)
 
                 val finished = System.currentTimeMillis()
                 val count = countSymbols()
                 LOG.info("Updated symbol index in ${finished - started} ms! (${count} symbol(s))")
+                count
             }
+
+            updateSymbolCount(symbolCount)
         } catch (e: Exception) {
             LOG.error("Error while updating symbol index")
             LOG.printStackTrace(e)
+        }
+    }
+
+    private fun updateSymbolCount(symbolCount: Int) {
+        if (!isPersistent) return
+
+        try {
+            transaction(db) {
+                val existing = SymbolIndexMetadataEntity.all().firstOrNull()
+                if (existing != null) {
+                    existing.symbolCount = symbolCount
+                    existing.indexedAt = System.currentTimeMillis()
+                }
+            }
+        } catch (e: Exception) {
+            LOG.warn("Error updating symbol count in metadata: ${e.message}")
         }
     }
 
