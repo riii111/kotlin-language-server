@@ -14,7 +14,7 @@ class LspResponseCacheTest {
 
         cache.put(uri, 1, 5, 1, "result")
 
-        assertThat(cache.get(uri, 1, 5, 1), equalTo("result"))
+        assertThat(cache.get(uri, 1, 5, 1)?.value, equalTo("result"))
     }
 
     @Test
@@ -23,6 +23,18 @@ class LspResponseCacheTest {
         val uri = URI.create("file:///test.kt")
 
         assertThat(cache.get(uri, 1, 5, 1), nullValue())
+    }
+
+    @Test
+    fun `caches null values`() {
+        val cache = LspResponseCache<String?>()
+        val uri = URI.create("file:///test.kt")
+
+        cache.put(uri, 1, 5, 1, null)
+
+        val result = cache.get(uri, 1, 5, 1)
+        assertThat(result, notNullValue())
+        assertThat(result?.value, nullValue())
     }
 
     @Test
@@ -57,7 +69,7 @@ class LspResponseCacheTest {
         cache.put(uri, 4, 0, 1, "fourth")
 
         assertThat(cache.get(uri, 1, 0, 1), nullValue())
-        assertThat(cache.get(uri, 4, 0, 1), equalTo("fourth"))
+        assertThat(cache.get(uri, 4, 0, 1)?.value, equalTo("fourth"))
         assertThat(cache.size(), equalTo(3))
     }
 
@@ -74,9 +86,9 @@ class LspResponseCacheTest {
 
         cache.put(uri, 4, 0, 1, "fourth")
 
-        assertThat(cache.get(uri, 1, 0, 1), equalTo("first"))
+        assertThat(cache.get(uri, 1, 0, 1)?.value, equalTo("first"))
         assertThat(cache.get(uri, 2, 0, 1), nullValue())
-        assertThat(cache.get(uri, 3, 0, 1), equalTo("third"))
+        assertThat(cache.get(uri, 3, 0, 1)?.value, equalTo("third"))
     }
 
     @Test
@@ -93,7 +105,7 @@ class LspResponseCacheTest {
 
         assertThat(cache.get(uri1, 1, 0, 1), nullValue())
         assertThat(cache.get(uri1, 2, 0, 1), nullValue())
-        assertThat(cache.get(uri2, 1, 0, 1), equalTo("file2-pos1"))
+        assertThat(cache.get(uri2, 1, 0, 1)?.value, equalTo("file2-pos1"))
     }
 
     @Test

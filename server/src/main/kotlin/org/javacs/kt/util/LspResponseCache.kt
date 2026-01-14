@@ -20,10 +20,13 @@ class LspResponseCache<T>(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CacheKey, T>?): Boolean = size > maxSize
     }
 
+    data class CacheResult<T>(val value: T)
+
     @Synchronized
-    fun get(uri: URI, line: Int, character: Int, fileVersion: Int): T? {
+    @Suppress("UNCHECKED_CAST")
+    fun get(uri: URI, line: Int, character: Int, fileVersion: Int): CacheResult<T>? {
         val key = CacheKey(uri, line, character, fileVersion)
-        return cache[key]
+        return if (cache.containsKey(key)) CacheResult(cache[key] as T) else null
     }
 
     @Synchronized

@@ -136,7 +136,7 @@ class KotlinTextDocumentService(
 
                 hoverCache.get(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Hover cache hit")
-                    return@supplyAsync cached
+                    return@supplyAsync cached.value
                 }
 
                 val (file, cursor) = recover(position, Recompile.NEVER) ?: return@supplyAsync null
@@ -168,14 +168,15 @@ class KotlinTextDocumentService(
 
                 definitionCache.get(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Definition cache hit")
-                    return@supplyAsync Either.forLeft(listOf(cached))
+                    return@supplyAsync cached.value?.let(::listOf)?.let { Either.forLeft(it) }
+                        ?: Either.forLeft(emptyList())
                 }
 
                 val (file, cursor) = recover(position, Recompile.NEVER)
                     ?: return@supplyAsync Either.forLeft(emptyList())
                 val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
 
-                result?.let { definitionCache.put(uri, line, character, fileVersion, it) }
+                definitionCache.put(uri, line, character, fileVersion, result)
 
                 result?.let(::listOf)
                     ?.let { Either.forLeft<List<Location>, List<LocationLink>>(it) }
@@ -210,8 +211,8 @@ class KotlinTextDocumentService(
                 val character = position.position.character
 
                 completionCache.get(uri, line, character, fileVersion)?.let { cached ->
-                    LOG.info("Completion cache hit with {} items", cached.items.size)
-                    return@supplyAsync Either.forRight(cached)
+                    LOG.info("Completion cache hit with {} items", cached.value.items.size)
+                    return@supplyAsync Either.forRight(cached.value)
                 }
 
                 val (file, cursor) = recover(position, Recompile.NEVER)
@@ -298,8 +299,8 @@ class KotlinTextDocumentService(
             val character = position.position.character
 
             referencesCache.get(uri, line, character, fileVersion)?.let { cached ->
-                LOG.info("References cache hit with {} locations", cached.size)
-                return@supplyAsync cached
+                LOG.info("References cache hit with {} locations", cached.value?.size ?: 0)
+                return@supplyAsync cached.value
             }
 
             val result = position.textDocument.filePath
