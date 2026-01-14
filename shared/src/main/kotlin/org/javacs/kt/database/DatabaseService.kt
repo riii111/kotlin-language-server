@@ -72,6 +72,10 @@ class SymbolIndexMetadataEntity(id: EntityID<Int>) : IntEntity(id) {
 class DatabaseService {
 
     companion object {
+        /**
+         * Database schema version. Increment this when changing table structures.
+         * When version mismatches, the database will be deleted and recreated.
+         */
         const val DB_VERSION = 5
         const val DB_FILENAME = "kls_database.db"
     }

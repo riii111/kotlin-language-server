@@ -94,16 +94,16 @@ class SymbolIndex(
             transaction(db) {
                 val metadata = SymbolIndexMetadataEntity.all().firstOrNull()
                 if (metadata == null) {
-                    LOG.info("No symbol index metadata found, index needs to be rebuilt")
+                    LOG.debug("No symbol index metadata found, index needs to be rebuilt")
                     false
                 } else if (metadata.buildFileVersion < currentBuildFileVersion) {
-                    LOG.info("Symbol index is stale (indexed at version ${metadata.buildFileVersion}, current version $currentBuildFileVersion)")
+                    LOG.debug("Symbol index is stale (indexed at version ${metadata.buildFileVersion}, current version $currentBuildFileVersion)")
                     false
                 } else if (metadata.symbolCount == 0) {
-                    LOG.info("Symbol index is empty, needs to be rebuilt")
+                    LOG.debug("Symbol index is empty, needs to be rebuilt")
                     false
                 } else {
-                    LOG.info("Symbol index is valid (${metadata.symbolCount} symbols, indexed at version ${metadata.buildFileVersion})")
+                    LOG.debug("Symbol index is valid (${metadata.symbolCount} symbols, indexed at version ${metadata.buildFileVersion})")
                     true
                 }
             }
@@ -118,34 +118,20 @@ class SymbolIndex(
      */
     fun getIndexedSymbolCount(): Int {
         return try {
-            transaction(db) {
-                countSymbols()
-            }
+            transaction(db) { countSymbols() }
         } catch (e: Exception) {
             0
         }
     }
 
     private fun countSymbols(): Int =
-        Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()].toInt()
+        Symbols.selectAll().count().toInt()
 
     private fun clearAllSymbolTables() {
         Symbols.deleteAll()
         Locations.deleteAll()
         Ranges.deleteAll()
         Positions.deleteAll()
-    }
-
-    private fun updateMetadata(buildFileVersion: Long, symbolCount: Int) {
-        if (!isPersistent) return
-
-        SymbolIndexMetadata.deleteAll()
-        SymbolIndexMetadataEntity.new {
-            this.buildFileVersion = buildFileVersion
-            this.indexedAt = System.currentTimeMillis()
-            this.symbolCount = symbolCount
-        }
-        LOG.info("Symbol index metadata updated: buildFileVersion=$buildFileVersion, symbolCount=$symbolCount")
     }
 
     /** Rebuilds the entire index. May take a while. */
@@ -163,7 +149,7 @@ class SymbolIndex(
                 val packages = collectAllPackages(module)
                 LOG.info("Found ${packages.size} packages to index")
 
-                val symbolCount = transaction(db) {
+                transaction(db) {
                     clearAllSymbolTables()
 
                     var lastUpdateTime = System.currentTimeMillis()
@@ -189,14 +175,18 @@ class SymbolIndex(
                     }
 
                     val finished = System.currentTimeMillis()
-                    val count = countSymbols()
-                    LOG.info("Updated full symbol index in ${finished - started} ms! (${count} symbol(s))")
+                    val symbolCount = countSymbols()
+                    LOG.info("Updated full symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
 
-                    if (buildFileVersion > 0) {
-                        updateMetadata(buildFileVersion, count)
+                    if (buildFileVersion > 0 && isPersistent) {
+                        SymbolIndexMetadata.deleteAll()
+                        SymbolIndexMetadataEntity.new {
+                            this.buildFileVersion = buildFileVersion
+                            this.indexedAt = System.currentTimeMillis()
+                            this.symbolCount = symbolCount
+                        }
+                        LOG.debug("Symbol index metadata updated: buildFileVersion=$buildFileVersion, symbolCount=$symbolCount")
                     }
-
-                    count
                 }
             } catch (e: Exception) {
                 LOG.error("Error while updating symbol index")
@@ -212,36 +202,25 @@ class SymbolIndex(
         LOG.info("Updating symbol index...")
 
         try {
-            val symbolCount = transaction(db) {
+            transaction(db) {
                 removeDeclarations(remove)
                 addDeclarations(add)
 
                 val finished = System.currentTimeMillis()
-                val count = countSymbols()
-                LOG.info("Updated symbol index in ${finished - started} ms! (${count} symbol(s))")
-                count
-            }
+                val symbolCount = countSymbols()
+                LOG.info("Updated symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
 
-            updateSymbolCount(symbolCount)
-        } catch (e: Exception) {
-            LOG.error("Error while updating symbol index")
-            LOG.printStackTrace(e)
-        }
-    }
-
-    private fun updateSymbolCount(symbolCount: Int) {
-        if (!isPersistent) return
-
-        try {
-            transaction(db) {
-                val existing = SymbolIndexMetadataEntity.all().firstOrNull()
-                if (existing != null) {
-                    existing.symbolCount = symbolCount
-                    existing.indexedAt = System.currentTimeMillis()
+                if (isPersistent) {
+                    val existing = SymbolIndexMetadataEntity.all().firstOrNull()
+                    if (existing != null) {
+                        existing.symbolCount = symbolCount
+                        existing.indexedAt = System.currentTimeMillis()
+                    }
                 }
             }
         } catch (e: Exception) {
-            LOG.warn("Error updating symbol count in metadata: ${e.message}")
+            LOG.error("Error while updating symbol index")
+            LOG.printStackTrace(e)
         }
     }
 
