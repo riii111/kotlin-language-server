@@ -64,6 +64,7 @@ class KotlinTextDocumentService(
     // Response caches for LSP operations
     private val definitionCache = LspResponseCache<Location?>()
     private val hoverCache = LspResponseCache<Hover?>()
+    private val completionCache = LspResponseCache<CompletionList>()
 
     var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
     val lintTodo = mutableSetOf<URI>()
@@ -207,11 +208,26 @@ class KotlinTextDocumentService(
         CompletableFuture.supplyAsync({
             reportTime {
                 LOG.info("Completing at {}", describePosition(position))
+                val uri = parseURI(position.textDocument.uri)
+                val fileVersion = sf.getVersion(uri)
+                val line = position.position.line
+                val character = position.position.character
+
+                // Check cache first
+                completionCache.get(uri, line, character, fileVersion)?.let { cached ->
+                    LOG.info("Completion cache hit with {} items", cached.items.size)
+                    return@supplyAsync Either.forRight(cached)
+                }
+
                 val (file, cursor) = recover(position, Recompile.NEVER)
                     ?: return@supplyAsync Either.forRight(CompletionList()) // TODO: Investigate when to recompile
-                val completions = completions(file, cursor, sp.index, config.completion)
-                LOG.info("Found {} items", completions.items.size)
-                Either.forRight(completions)
+                val result = completions(file, cursor, sp.index, config.completion)
+
+                // Store in cache
+                completionCache.put(uri, line, character, fileVersion, result)
+
+                LOG.info("Found {} items", result.items.size)
+                Either.forRight(result)
             }
         }, completionExecutor)
 
@@ -275,6 +291,7 @@ class KotlinTextDocumentService(
         // Invalidate caches for this file
         definitionCache.invalidate(uri)
         hoverCache.invalidate(uri)
+        completionCache.invalidate(uri)
         sf.edit(uri, params.textDocument.version, params.contentChanges)
         lintLater(uri)
     }
