@@ -33,8 +33,9 @@ import org.jetbrains.kotlin.resolve.diagnostics.Diagnostics
 import java.net.URI
 import java.io.Closeable
 import java.nio.file.Path
-import java.time.Duration
+import java.util.concurrent.Executors
 import java.util.concurrent.CompletableFuture
+import java.time.Duration
 
 class KotlinTextDocumentService(
     private val sf: SourceFiles,
@@ -46,6 +47,12 @@ class KotlinTextDocumentService(
 ) : TextDocumentService, Closeable {
     private lateinit var client: LanguageClient
     private val async = AsyncExecutor()
+    private val definitionExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "kls-definition").apply { isDaemon = true }
+    }
+    private val precompileExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "kls-precompile").apply { isDaemon = true }
+    }
     private val formattingService = FormattingService(config.formatting)
     private val importPreloader = ImportPreloader(uriContentProvider.classContentProvider, cp)
 
@@ -126,17 +133,18 @@ class KotlinTextDocumentService(
         TODO("not implemented")
     }
 
-    override fun definition(position: DefinitionParams): CompletableFuture<Either<List<Location>, List<LocationLink>>> = async.compute {
-        reportTime {
-            LOG.info("Go-to-definition at {}", describePosition(position))
-
-            val (file, cursor) = recover(position, Recompile.NEVER) ?: return@compute Either.forLeft(emptyList())
-            goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
-                ?.let(::listOf)
-                ?.let { Either.forLeft<List<Location>, List<LocationLink>>(it) }
-                ?: noResult("Couldn't find definition at ${describePosition(position)}", Either.forLeft(emptyList()))
-        }
-    }
+    override fun definition(position: DefinitionParams): CompletableFuture<Either<List<Location>, List<LocationLink>>> =
+        CompletableFuture.supplyAsync({
+            reportTime {
+                LOG.info("Go-to-definition at {}", describePosition(position))
+                val (file, cursor) = recover(position, Recompile.NEVER)
+                    ?: return@supplyAsync Either.forLeft(emptyList())
+                goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
+                    ?.let(::listOf)
+                    ?.let { Either.forLeft<List<Location>, List<LocationLink>>(it) }
+                    ?: noResult("Couldn't find definition at ${describePosition(position)}", Either.forLeft(emptyList()))
+            }
+        }, definitionExecutor)
 
     override fun rangeFormatting(params: DocumentRangeFormattingParams): CompletableFuture<List<TextEdit>> = async.compute {
         val code = extractRange(params.textDocument.content, params.range)
@@ -188,12 +196,13 @@ class KotlinTextDocumentService(
         sf.open(uri, params.textDocument.text, params.textDocument.version)
         lintNow(uri)
 
-        // Preload imports in background to speed up go-to-definition
-        try {
-            val parsed = sp.parsedFile(uri)
-            importPreloader.preloadImports(parsed)
-        } catch (e: Exception) {
-            LOG.debug("Failed to preload imports for {}: {}", uri, e.message)
+        // Pre-compile in background so gd is fast on first use
+        precompileExecutor.submit {
+            try {
+                sp.latestCompiledVersion(uri)
+            } catch (e: Exception) {
+                LOG.debug("Pre-compile failed for {}: {}", describeURI(uri), e.message)
+            }
         }
     }
 
@@ -352,6 +361,8 @@ class KotlinTextDocumentService(
         async.shutdown(awaitTermination)
         debounceLint.shutdown(awaitTermination)
         importPreloader.shutdown()
+        definitionExecutor.shutdown()
+        precompileExecutor.shutdown()
     }
 
     override fun close() {
