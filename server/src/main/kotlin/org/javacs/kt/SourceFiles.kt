@@ -200,6 +200,8 @@ class SourceFiles(
     fun isIncluded(uri: URI): Boolean = exclusions.isURIIncluded(uri)
 
     fun getVersion(uri: URI): Int = files.getVersion(uri)
+
+    fun openFiles(): Collection<URI> = open.toList()
 }
 
 private fun patch(sourceText: String, change: TextDocumentContentChangeEvent): String {
