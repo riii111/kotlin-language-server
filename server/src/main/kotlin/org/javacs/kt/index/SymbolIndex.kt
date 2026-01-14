@@ -16,6 +16,7 @@ import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.withLock
 import kotlin.sequences.Sequence
@@ -100,8 +101,10 @@ class SymbolIndex(
     private val indexLock = ReentrantReadWriteLock()
 
     @Volatile
-    private var cancellationRequested = false
     private var currentRefreshTask: CompletableFuture<*>? = null
+
+    @Volatile
+    private var currentCancellationToken: AtomicBoolean? = null
 
     /** Indicates whether a full index refresh is currently in progress. */
     @Volatile
@@ -120,7 +123,10 @@ class SymbolIndex(
     fun refresh(module: ModuleDescriptor, exclusions: Sequence<DeclarationDescriptor>) {
         // Cancel any existing refresh task
         cancelCurrentRefresh()
-        cancellationRequested = false
+
+        // Create a unique cancellation token for this task
+        val cancellationToken = AtomicBoolean(false)
+        currentCancellationToken = cancellationToken
         isIndexing = true
 
         val started = System.currentTimeMillis()
@@ -133,9 +139,8 @@ class SymbolIndex(
                 LOG.info("Found ${packages.size} packages to index")
 
                 // Check for cancellation before acquiring lock
-                if (cancellationRequested) {
+                if (cancellationToken.get()) {
                     LOG.info("Indexing cancelled before starting")
-                    progress.close()
                     return@thenApplyAsync
                 }
 
@@ -149,7 +154,7 @@ class SymbolIndex(
 
                         for ((index, pkgName) in packages.withIndex()) {
                             // Check for cancellation at each package
-                            if (cancellationRequested) {
+                            if (cancellationToken.get()) {
                                 LOG.info("Indexing cancelled at package $index/${packages.size}")
                                 return@transaction
                             }
@@ -175,7 +180,7 @@ class SymbolIndex(
                             }
                         }
 
-                        if (!cancellationRequested) {
+                        if (!cancellationToken.get()) {
                             val finished = System.currentTimeMillis()
                             val count = Symbols.slice(Symbols.fqName.count()).selectAll().first()[Symbols.fqName.count()]
                             LOG.info("Updated full symbol index in ${finished - started} ms! (${count} symbol(s))")
@@ -187,17 +192,15 @@ class SymbolIndex(
                 LOG.printStackTrace(e)
             } finally {
                 isIndexing = false
+                progress.close()
             }
-
-            progress.close()
         }
     }
 
     /** Cancels the current refresh task if one is running. */
     fun cancelCurrentRefresh() {
-        cancellationRequested = true
+        currentCancellationToken?.set(true)
         currentRefreshTask?.cancel(false)
-        currentRefreshTask = null
     }
 
     // Removes a list of indexes and adds another list. Everything is done in the same transaction.
@@ -269,10 +272,19 @@ class SymbolIndex(
         }
 
         val readLock = indexLock.readLock()
-        if (!readLock.tryLock(INDEX_QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-            LOG.warn("Index query timed out while waiting for lock, returning empty result (graceful degradation)")
+        val lockAcquired = try {
+            readLock.tryLock(INDEX_QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            LOG.warn("Index query interrupted while waiting for lock")
             return emptyList()
         }
+
+        if (!lockAcquired) {
+            LOG.info("Index query timed out while waiting for lock, returning empty result (graceful degradation)")
+            return emptyList()
+        }
+
         try {
             return transaction(db) {
                 // TODO: Extension completion currently only works if the receiver matches exactly,
