@@ -1,6 +1,7 @@
 package org.javacs.kt
 
 import org.javacs.kt.classpath.ClassPathEntry
+import org.javacs.kt.classpath.ClassPathResolver
 import org.javacs.kt.classpath.defaultClassPathResolver
 import org.javacs.kt.compiler.Compiler
 import org.javacs.kt.database.DatabaseService
@@ -29,6 +30,19 @@ class CompilerClassPath(
     val outputDirectory: File = Files.createTempDirectory("klsBuildOutput").toFile()
     val javaHome: String? = System.getProperty("java.home", null)
 
+    @Volatile
+    private var cachedResolver: ClassPathResolver? = null
+
+    /** Returns the current build file version (max timestamp of all build files) */
+    val currentBuildFileVersion: Long
+        get() = getOrCreateResolver().currentBuildFileVersion
+
+    private fun getOrCreateResolver(): ClassPathResolver {
+        return cachedResolver ?: defaultClassPathResolver(workspaceRoots, databaseService.db).also {
+            cachedResolver = it
+        }
+    }
+
     var compiler = Compiler(
         javaSourcePath,
         classPath.map { it.compiledJar }.toSet(),
@@ -52,7 +66,8 @@ class CompilerClassPath(
         updateJavaSourcePath: Boolean = true
     ): Boolean {
         // TODO: Fetch class path and build script class path concurrently (and asynchronously)
-        val resolver = defaultClassPathResolver(workspaceRoots, databaseService.db)
+        cachedResolver = null
+        val resolver = getOrCreateResolver()
         var refreshCompiler = updateJavaSourcePath
 
         if (updateClassPath) {
