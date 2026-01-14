@@ -103,6 +103,11 @@ class SymbolIndex(
     private var cancellationRequested = false
     private var currentRefreshTask: CompletableFuture<*>? = null
 
+    /** Indicates whether a full index refresh is currently in progress. */
+    @Volatile
+    var isIndexing: Boolean = false
+        private set
+
     var progressFactory: Progress.Factory = Progress.Factory.None
 
     init {
@@ -116,6 +121,7 @@ class SymbolIndex(
         // Cancel any existing refresh task
         cancelCurrentRefresh()
         cancellationRequested = false
+        isIndexing = true
 
         val started = System.currentTimeMillis()
         LOG.info("Updating full symbol index...")
@@ -179,6 +185,8 @@ class SymbolIndex(
             } catch (e: Exception) {
                 LOG.error("Error while updating symbol index")
                 LOG.printStackTrace(e)
+            } finally {
+                isIndexing = false
             }
 
             progress.close()
@@ -256,6 +264,10 @@ class SymbolIndex(
             && fqName.shortName().toString().length <= MAX_SHORT_NAME_LENGTH
 
     fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%"): List<Symbol> {
+        if (isIndexing) {
+            LOG.debug("Index query while indexing is in progress, results may be incomplete")
+        }
+
         val readLock = indexLock.readLock()
         if (!readLock.tryLock(INDEX_QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
             LOG.warn("Index query timed out while waiting for lock, returning empty result (graceful degradation)")

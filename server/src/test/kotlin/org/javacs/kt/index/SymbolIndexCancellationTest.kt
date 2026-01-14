@@ -42,4 +42,16 @@ class SymbolIndexCancellationTest {
         val result = index.query("Test")
         assertThat(result, `is`(emptyList()))
     }
+
+    @Test
+    fun `isIndexing is initially false`() {
+        assertThat(index.isIndexing, `is`(false))
+    }
+
+    @Test
+    fun `isIndexing remains false when no refresh is triggered`() {
+        // Just querying should not change isIndexing state
+        index.query("Test")
+        assertThat(index.isIndexing, `is`(false))
+    }
 }
