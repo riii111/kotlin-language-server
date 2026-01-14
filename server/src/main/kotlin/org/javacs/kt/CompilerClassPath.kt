@@ -9,6 +9,7 @@ import org.javacs.kt.progress.Progress
 import org.javacs.kt.util.AsyncExecutor
 import java.io.Closeable
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.io.File
 import java.nio.file.FileSystems
@@ -251,6 +252,10 @@ class CompilerClassPath(
             .walkIncluded()
             .filter { sourceMatcher.matches(it.fileName) }
             .toSet()
+    }
+
+    fun waitForResolution(timeout: Long = 60, unit: TimeUnit = TimeUnit.SECONDS) {
+        resolutionFuture.get()?.get(timeout, unit)
     }
 
     override fun close() {

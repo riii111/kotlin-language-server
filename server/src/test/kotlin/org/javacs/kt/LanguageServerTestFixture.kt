@@ -54,6 +54,8 @@ abstract class LanguageServerTestFixture(
         languageServer.connect(this)
         languageServer.initialize(init).join()
 
+        languageServer.classPath.waitForResolution()
+
         return languageServer
     }
 

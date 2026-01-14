@@ -25,6 +25,7 @@ class AdditionalWorkspaceTest : LanguageServerTestFixture("mainWorkspace") {
 
     @Test fun `junit should be on classpath`() {
         addWorkspaceRoot()
+        languageServer.classPath.waitForResolution()
         open(file)
 
         val hover = languageServer.textDocumentService.hover(hoverParams(file, 5, 14)).get()!!

@@ -43,6 +43,16 @@ If code changes don't seem to take effect:
 # Attach debugger to port 8000
 ```
 
+## Degraded Mode During Startup
+
+When the LSP starts, classpath resolution runs in the background. During this time:
+
+- **Diagnostics are disabled** to prevent false positive errors
+- **External dependencies** are not available for go-to-definition, completion
+- **Local symbols** and syntax features work normally
+
+A progress notification "Resolving dependencies..." is shown during resolution. Once complete, diagnostics appear and full functionality is available.
+
 ## Known Limitations
 
 1. **Memory usage** - SymbolIndex loads all symbols into memory, causing OOM on large projects (5,000+ files). Disable indexing for such projects.
@@ -56,6 +66,6 @@ If code changes don't seem to take effect:
 |----------|-------|
 | `CompiledFile.kt:67` | JDK symbol resolution not working |
 | `Compiler.kt:154-157` | KotlinScriptDefinition is deprecated |
-| `CompilerClassPath.kt:54` | Parallel classpath/build script resolution |
+| `CompilerClassPath.kt:90` | Parallel classpath/build script resolution (partially addressed by background resolution) |
 | `FindReferences.kt:118,182` | Limit search using imports, improve selectivity |
 | `SemanticTokens.kt:114` | Range cutoff optimization |

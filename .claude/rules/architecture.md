@@ -59,6 +59,32 @@ DefaultClassPathResolver (main)
 3. **`CompiledFile`** - Represents compiled file with binding context
 4. **`Compiler`** - Kotlin compiler API wrapper
 5. **`SymbolIndex`** - Global symbol indexing with Exposed ORM
+6. **`CompilerClassPath`** - Kotlin compiler classpath management with background resolution
+
+## Background Classpath Resolution
+
+Classpath resolution (Gradle/Maven CLI execution) runs in the background to provide instant LSP startup:
+
+```
+┌─────────┐    ┌───────────┐    ┌───────┐
+│ PENDING │───▶│ RESOLVING │───▶│ READY │
+└─────────┘    └───────────┘    └───────┘
+                    │                ▲
+                    │ (error)        │ (retry)
+                    ▼                │
+               ┌────────┐────────────┘
+               │ FAILED │
+               └────────┘
+```
+
+**Degraded Mode (during PENDING/RESOLVING):**
+- Syntax highlighting: Works
+- Document symbols: Works
+- Go to Definition (local): Works
+- Go to Definition (external): Limited
+- Completion (local): Works
+- Completion (external): Limited
+- Diagnostics: Disabled (to prevent false positives)
 
 ## Adding a New LSP Feature
 
