@@ -230,11 +230,15 @@ class CompilerClassPath(
     fun changedOnDisk(file: Path): Boolean {
         val buildScript = isBuildScript(file)
         val javaSource = isJavaSource(file)
-        if (buildScript || javaSource) {
-            return refresh(updateClassPath = buildScript, updateBuildScriptClassPath = false, updateJavaSourcePath = javaSource)
-        } else {
+
+        if (buildScript) {
+            LOG.info("Build script changed: {}, triggering background resolution", file)
+            startBackgroundResolution()
             return false
+        } else if (javaSource) {
+            return refresh(updateClassPath = false, updateBuildScriptClassPath = false, updateJavaSourcePath = true)
         }
+        return false
     }
 
     private fun isJavaSource(file: Path): Boolean = file.fileName.toString().endsWith(".java")
