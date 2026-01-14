@@ -12,10 +12,13 @@ import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 
-/**
- * Manages the class path (compiled JARs, etc), the Java source path
- * and the compiler. Note that Kotlin sources are stored in SourcePath.
- */
+data class ClassPathDiff(
+    val added: Set<ClassPathEntry>,
+    val removed: Set<ClassPathEntry>
+) {
+    val hasChanges: Boolean get() = added.isNotEmpty() || removed.isNotEmpty()
+}
+
 class CompilerClassPath(
     private val config: CompilerConfiguration,
     private val scriptsConfig: ScriptsConfiguration,
@@ -59,22 +62,27 @@ class CompilerClassPath(
         compiler.updateConfiguration(config)
     }
 
-    /** Updates and possibly reinstantiates the compiler using new paths. */
+    @Volatile
+    var lastClassPathDiff: ClassPathDiff? = null
+        private set
+
+    // TODO: Fetch class path and build script class path concurrently
     private fun refresh(
         updateClassPath: Boolean = true,
         updateBuildScriptClassPath: Boolean = true,
         updateJavaSourcePath: Boolean = true
     ): Boolean {
-        // TODO: Fetch class path and build script class path concurrently (and asynchronously)
         cachedResolver = null
         val resolver = getOrCreateResolver()
         var refreshCompiler = updateJavaSourcePath
+        lastClassPathDiff = null
 
         if (updateClassPath) {
             val newClassPath = resolver.classpathOrEmpty
             if (newClassPath != classPath) {
                 synchronized(classPath) {
-                    syncPaths(classPath, newClassPath, "class path") { it.compiledJar }
+                    val (added, removed) = syncClassPath(newClassPath)
+                    lastClassPathDiff = ClassPathDiff(added, removed)
                 }
                 refreshCompiler = true
             }
@@ -82,7 +90,7 @@ class CompilerClassPath(
             async.compute {
                 val newClassPathWithSources = resolver.classpathWithSources
                 synchronized(classPath) {
-                    syncPaths(classPath, newClassPathWithSources, "class path with sources") { it.compiledJar }
+                    syncClassPath(newClassPathWithSources)
                 }
             }
         }
@@ -113,7 +121,19 @@ class CompilerClassPath(
         return refreshCompiler
     }
 
-    /** Synchronizes the given two path sets and logs the differences. */
+    private fun syncClassPath(newClassPath: Set<ClassPathEntry>): Pair<Set<ClassPathEntry>, Set<ClassPathEntry>> {
+        val added = newClassPath - classPath
+        val removed = classPath - newClassPath
+
+        logAdded(added.map { it.compiledJar }, "class path")
+        logRemoved(removed.map { it.compiledJar }, "class path")
+
+        classPath.removeAll(removed)
+        classPath.addAll(added)
+
+        return Pair(added, removed)
+    }
+
     private fun <T> syncPaths(dest: MutableSet<T>, new: Set<T>, name: String, toPath: (T) -> Path) {
         val added = new - dest
         val removed = dest - new
