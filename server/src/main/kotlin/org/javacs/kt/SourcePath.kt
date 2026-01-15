@@ -275,6 +275,16 @@ class SourcePath(
         files.keys.forEach { save(it) }
     }
 
+    fun cleanFiles(uris: Collection<URI>) {
+        uris.forEach { uri ->
+            files[uri]?.clean()
+        }
+    }
+
+    fun cleanAllFiles() {
+        files.values.forEach { it.clean() }
+    }
+
     fun refreshDependencyIndexes() {
         compileAllFiles()
 
