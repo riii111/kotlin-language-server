@@ -20,22 +20,38 @@ class GradleClassPathResolver(private val path: Path, private val includeKotlinD
     override val resolverType: String = "Gradle"
     private val projectDirectory: Path get() = path.parent
 
-    private var cachedModuleClassPaths: Map<String, ModuleClassPath> = emptyMap()
+    private var cachedResolutionResult: Pair<Set<Path>, Map<String, ModuleClassPath>>? = null
+    private var cachedBuildFileVersion: Long = -1
 
-    val moduleClassPaths: Map<String, ModuleClassPath> get() = cachedModuleClassPaths
+    private fun resolveIfNeeded(): Pair<Set<Path>, Map<String, ModuleClassPath>> {
+        val currentVersion = currentBuildFileVersion
+        val cached = cachedResolutionResult
+        if (cached != null && cachedBuildFileVersion == currentVersion) {
+            return cached
+        }
 
-    override val classpath: Set<ClassPathEntry> get() {
         val scripts = listOf("projectClassPathFinder.gradle")
         val tasks = listOf("kotlinLSPProjectDeps")
 
-        val (dependencies, modules) = readDependenciesAndModulesViaGradleCLI(projectDirectory, scripts, tasks)
-        cachedModuleClassPaths = modules
+        val result = readDependenciesAndModulesViaGradleCLI(projectDirectory, scripts, tasks)
+        cachedResolutionResult = result
+        cachedBuildFileVersion = currentVersion
 
-        if (modules.isNotEmpty()) {
-            LOG.info("Detected {} modules: {}", modules.size, modules.keys)
+        if (result.second.isNotEmpty()) {
+            LOG.info("Detected {} modules: {}", result.second.size, result.second.keys)
         }
 
+        return result
+    }
+
+    val moduleClassPaths: Map<String, ModuleClassPath>
+        get() = resolveIfNeeded().second
+
+    override val classpath: Set<ClassPathEntry> get() {
+        val (dependencies, _) = resolveIfNeeded()
+
         return dependencies
+            .filter { it.toString().lowercase().endsWith(".jar") || Files.isDirectory(it) }
             .apply { if (isNotEmpty()) LOG.info("Successfully resolved dependencies for '${projectDirectory.fileName}' using Gradle") }
             .map { ClassPathEntry(it, null) }.toSet()
     }

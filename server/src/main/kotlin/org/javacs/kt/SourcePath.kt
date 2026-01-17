@@ -127,8 +127,7 @@ class SourcePath(
             else all()
         }
 
-        // Creates a shallow copy
-        fun clone(): SourceFile = SourceFile(uri, content, path, parsed, compiledFile, compiledContext, module, language, isTemporary)
+        fun clone(): SourceFile = SourceFile(uri, content, path, parsed, compiledFile, compiledContext, module, language, isTemporary, lastSavedFile, moduleId)
     }
 
     private fun sourceFile(uri: URI): SourceFile {
