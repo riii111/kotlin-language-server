@@ -1,26 +1,18 @@
 package org.javacs.kt.database
 
 import org.javacs.kt.LOG
-import org.jetbrains.exposed.dao.IntEntity
-import org.jetbrains.exposed.dao.IntEntityClass
-import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.nio.file.Files
 import java.nio.file.Path
 
 private object DatabaseMetadata : IntIdTable() {
     var version = integer("version")
-}
-
-class DatabaseMetadataEntity(id: EntityID<Int>) : IntEntity(id) {
-    companion object : IntEntityClass<DatabaseMetadataEntity>(DatabaseMetadata)
-
-    var version by DatabaseMetadata.version
 }
 
 private const val MAX_FQNAME_LENGTH = 255
@@ -60,14 +52,6 @@ object SymbolIndexMetadata : IntIdTable() {
     val symbolCount = integer("symbolcount")
 }
 
-class SymbolIndexMetadataEntity(id: EntityID<Int>) : IntEntity(id) {
-    companion object : IntEntityClass<SymbolIndexMetadataEntity>(SymbolIndexMetadata)
-
-    var buildFileVersion by SymbolIndexMetadata.buildFileVersion
-    var indexedAt by SymbolIndexMetadata.indexedAt
-    var symbolCount by SymbolIndexMetadata.symbolCount
-}
-
 object IndexedJars : IntIdTable() {
     val jarPath = varchar("jarpath", length = MAX_URI_LENGTH).uniqueIndex()
     val indexedAt = long("indexedat")
@@ -100,7 +84,7 @@ class DatabaseService {
         val currentVersion = transaction(database) {
             SchemaUtils.createMissingTablesAndColumns(DatabaseMetadata)
 
-            DatabaseMetadataEntity.all().firstOrNull()?.version ?: 0
+            DatabaseMetadata.selectAll().firstOrNull()?.get(DatabaseMetadata.version) ?: 0
         }
 
         if (currentVersion != DB_VERSION) {
