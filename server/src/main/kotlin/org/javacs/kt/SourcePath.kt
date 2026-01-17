@@ -374,18 +374,11 @@ class SourcePath(
     }
 
     fun refreshModuleAssignments() {
-        LOG.info("Refreshing module assignments for {} files", files.size)
-        var updated = 0
         for (sourceFile in files.values) {
             if (sourceFile.isTemporary) continue
             val path = sourceFile.path ?: continue
-            val newModuleId = cp.moduleRegistry.findModuleForFile(path)?.name
-            if (sourceFile.moduleId != newModuleId) {
-                sourceFile.moduleId = newModuleId
-                updated++
-            }
+            sourceFile.moduleId = cp.moduleRegistry.findModuleForFile(path)?.name
         }
-        LOG.info("Updated module assignments for {} files", updated)
     }
 
     /**

@@ -75,10 +75,24 @@ class GradleClassPathResolver(private val path: Path, private val includeKotlinD
     override val currentBuildFileVersion: Long get() = path.toFile().lastModified()
 
     companion object {
-        /** Create a Gradle resolver if a file is a pom. */
-        fun maybeCreate(file: Path): GradleClassPathResolver? =
-            file.takeIf { file.endsWith("build.gradle") || file.endsWith("build.gradle.kts") }
-                ?.let { GradleClassPathResolver(it, includeKotlinDSL = file.toString().endsWith(".kts")) }
+        // Submodules are handled by root project's allprojects {} block
+        fun maybeCreate(file: Path): GradleClassPathResolver? {
+            if (!file.endsWith("build.gradle") && !file.endsWith("build.gradle.kts")) {
+                return null
+            }
+
+            val projectDir = file.parent ?: return null
+            val hasSettingsFile = Files.exists(projectDir.resolve("settings.gradle")) ||
+                                  Files.exists(projectDir.resolve("settings.gradle.kts"))
+
+            if (!hasSettingsFile) {
+                LOG.debug("Skipping {} - no settings.gradle found (likely a submodule)", file)
+                return null
+            }
+
+            LOG.info("Creating Gradle resolver for root project: {}", projectDir)
+            return GradleClassPathResolver(file, includeKotlinDSL = file.toString().endsWith(".kts"))
+        }
     }
 }
 
