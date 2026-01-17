@@ -16,7 +16,7 @@ data class ModuleClassPath(
     val sourceDirs: Set<Path>
 )
 
-internal class GradleClassPathResolver(private val path: Path, private val includeKotlinDSL: Boolean): ClassPathResolver {
+class GradleClassPathResolver(private val path: Path, private val includeKotlinDSL: Boolean): ClassPathResolver {
     override val resolverType: String = "Gradle"
     private val projectDirectory: Path get() = path.parent
 

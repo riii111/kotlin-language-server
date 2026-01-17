@@ -39,6 +39,9 @@ interface ClassPathResolver {
     val currentBuildFileVersion: Long
         get() = 1L
 
+    val wrappedResolvers: List<ClassPathResolver>
+        get() = emptyList()
+
     companion object {
         /** A default empty classpath implementation */
         val empty = object : ClassPathResolver {
@@ -67,6 +70,7 @@ internal class UnionClassPathResolver(val lhs: ClassPathResolver, val rhs: Class
     override val buildScriptClasspathOrEmpty get() = lhs.buildScriptClasspathOrEmpty + rhs.buildScriptClasspathOrEmpty
     override val classpathWithSources get() = lhs.classpathWithSources + rhs.classpathWithSources
     override val currentBuildFileVersion: Long get() = max(lhs.currentBuildFileVersion, rhs.currentBuildFileVersion)
+    override val wrappedResolvers: List<ClassPathResolver> get() = listOf(lhs, rhs)
 }
 
 internal class FirstNonEmptyClassPathResolver(val lhs: ClassPathResolver, val rhs: ClassPathResolver) : ClassPathResolver {
@@ -79,4 +83,5 @@ internal class FirstNonEmptyClassPathResolver(val lhs: ClassPathResolver, val rh
         it.isNotEmpty()
     } ?: rhs.classpathWithSources
     override val currentBuildFileVersion: Long get() = max(lhs.currentBuildFileVersion, rhs.currentBuildFileVersion)
+    override val wrappedResolvers: List<ClassPathResolver> get() = listOf(lhs, rhs)
 }

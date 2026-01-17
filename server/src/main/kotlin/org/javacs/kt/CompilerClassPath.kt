@@ -2,6 +2,9 @@ package org.javacs.kt
 
 import org.javacs.kt.classpath.ClassPathEntry
 import org.javacs.kt.classpath.ClassPathResolver
+import org.javacs.kt.classpath.GradleClassPathResolver
+import org.javacs.kt.classpath.ModuleInfo
+import org.javacs.kt.classpath.ModuleRegistry
 import org.javacs.kt.classpath.defaultClassPathResolver
 import org.javacs.kt.compiler.Compiler
 import org.javacs.kt.database.DatabaseService
@@ -43,6 +46,8 @@ class CompilerClassPath(
     val classPath = mutableSetOf<ClassPathEntry>()
     val outputDirectory: File = Files.createTempDirectory("klsBuildOutput").toFile()
     val javaHome: String? = System.getProperty("java.home", null)
+
+    val moduleRegistry = ModuleRegistry()
 
     @Volatile
     private var cachedResolver: ClassPathResolver? = null
@@ -109,6 +114,8 @@ class CompilerClassPath(
                 refreshCompiler = true
             }
 
+            updateModuleRegistry(resolver)
+
             async.compute {
                 val newClassPathWithSources = resolver.classpathWithSources
                 synchronized(classPath) {
@@ -165,6 +172,52 @@ class CompilerClassPath(
 
         dest.removeAll(removed)
         dest.addAll(added)
+    }
+
+    private fun updateModuleRegistry(resolver: ClassPathResolver) {
+        moduleRegistry.clear()
+
+        val gradleResolver = findGradleResolver(resolver)
+        if (gradleResolver == null) {
+            LOG.debug("No Gradle resolver found, skipping module registry update")
+            return
+        }
+
+        val moduleClassPaths = gradleResolver.moduleClassPaths
+        if (moduleClassPaths.isEmpty()) {
+            LOG.debug("No modules found in Gradle resolver")
+            return
+        }
+
+        for ((name, moduleClassPath) in moduleClassPaths) {
+            if (moduleClassPath.sourceDirs.isEmpty()) continue
+
+            val rootPath = moduleClassPath.sourceDirs.firstOrNull()?.parent?.parent?.parent ?: continue
+            val moduleInfo = ModuleInfo(
+                name = name,
+                rootPath = rootPath,
+                sourceDirs = moduleClassPath.sourceDirs,
+                classPath = moduleClassPath.classPath
+            )
+            moduleRegistry.register(moduleInfo)
+        }
+
+        if (moduleRegistry.size() > 0) {
+            LOG.info("Module registry updated with {} modules: {}", moduleRegistry.size(), moduleRegistry.moduleNames())
+        }
+    }
+
+    private fun findGradleResolver(resolver: ClassPathResolver): GradleClassPathResolver? {
+        if (resolver is GradleClassPathResolver) {
+            return resolver
+        }
+        for (wrapped in resolver.wrappedResolvers) {
+            val found = findGradleResolver(wrapped)
+            if (found != null) {
+                return found
+            }
+        }
+        return null
     }
 
     fun updateCompilerConfiguration() {
