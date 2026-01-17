@@ -34,8 +34,13 @@ class GradleClassPathResolver(private val path: Path, private val includeKotlinD
         val tasks = listOf("kotlinLSPProjectDeps")
 
         val result = readDependenciesAndModulesViaGradleCLI(projectDirectory, scripts, tasks)
-        cachedResolutionResult = result
-        cachedBuildFileVersion = currentVersion
+
+        if (result.first.isNotEmpty()) {
+            cachedResolutionResult = result
+            cachedBuildFileVersion = currentVersion
+        } else {
+            LOG.warn("Gradle resolution returned empty result, not caching")
+        }
 
         if (result.second.isNotEmpty()) {
             LOG.info("Detected {} modules: {}", result.second.size, result.second.keys)
@@ -176,12 +181,12 @@ private fun findGradleCLIDependenciesAndModules(
     return parseGradleCLIOutput(result)
 }
 
-private val artifactPattern by lazy { "kotlin-lsp-gradle (.+)(?:\r?\n)".toRegex() }
+private val artifactPattern by lazy { "kotlin-lsp-gradle(?::\\S+)? (.+)(?:\r?\n)".toRegex() }
 private val gradleErrorWherePattern by lazy { "\\*\\s+Where:[\r\n]+(\\S\\.*)".toRegex() }
 
 private val projectPattern by lazy { "kotlin-lsp-project (.+)".toRegex() }
-private val sourceDirPattern by lazy { "kotlin-lsp-sourcedir (.+)".toRegex() }
-private val classpathPattern by lazy { "kotlin-lsp-gradle (.+)".toRegex() }
+private val sourceDirWithModulePattern by lazy { "kotlin-lsp-sourcedir:(\\S+) (.+)".toRegex() }
+private val classpathWithModulePattern by lazy { "kotlin-lsp-gradle:(\\S+) (.+)".toRegex() }
 
 private fun parseGradleCLIDependencies(output: String): Set<Path>? {
     LOG.debug(output)
@@ -195,47 +200,38 @@ private fun parseGradleCLIOutput(output: String): Pair<Set<Path>, Map<String, Mo
     LOG.debug(output)
 
     val allDependencies = mutableSetOf<Path>()
-    val moduleClassPaths = mutableMapOf<String, ModuleClassPath>()
-
-    var currentModuleName: String? = null
-    var currentClassPath = mutableSetOf<Path>()
-    var currentSourceDirs = mutableSetOf<Path>()
+    val moduleSourceDirs = mutableMapOf<String, MutableSet<Path>>()
+    val moduleClassPaths = mutableMapOf<String, MutableSet<Path>>()
+    val knownModules = mutableSetOf<String>()
 
     for (line in output.lines()) {
         val projectMatch = projectPattern.find(line)
         if (projectMatch != null) {
-            currentModuleName?.let { name ->
-                moduleClassPaths[name] = ModuleClassPath(
-                    moduleName = name,
-                    classPath = currentClassPath.toSet(),
-                    sourceDirs = currentSourceDirs.toSet()
-                )
-            }
-
-            currentModuleName = projectMatch.groupValues[1].trim()
-            currentClassPath = mutableSetOf()
-            currentSourceDirs = mutableSetOf()
+            val moduleName = projectMatch.groupValues[1].trim()
+            knownModules.add(moduleName)
             continue
         }
 
-        val sourceDirMatch = sourceDirPattern.find(line)
+        val sourceDirMatch = sourceDirWithModulePattern.find(line)
         if (sourceDirMatch != null) {
-            val pathStr = sourceDirMatch.groupValues[1].trim()
+            val moduleName = sourceDirMatch.groupValues[1]
+            val pathStr = sourceDirMatch.groupValues[2].trim()
             try {
                 val path = Paths.get(pathStr)
-                currentSourceDirs.add(path)
+                moduleSourceDirs.getOrPut(moduleName) { mutableSetOf() }.add(path)
             } catch (e: Exception) {
                 LOG.warn("Invalid source directory path: {}", pathStr)
             }
             continue
         }
 
-        val classpathMatch = classpathPattern.find(line)
+        val classpathMatch = classpathWithModulePattern.find(line)
         if (classpathMatch != null) {
-            val pathStr = classpathMatch.groupValues[1].trim()
+            val moduleName = classpathMatch.groupValues[1]
+            val pathStr = classpathMatch.groupValues[2].trim()
             try {
                 val path = Paths.get(pathStr)
-                currentClassPath.add(path)
+                moduleClassPaths.getOrPut(moduleName) { mutableSetOf() }.add(path)
                 allDependencies.add(path)
             } catch (e: Exception) {
                 LOG.warn("Invalid classpath path: {}", pathStr)
@@ -244,13 +240,13 @@ private fun parseGradleCLIOutput(output: String): Pair<Set<Path>, Map<String, Mo
         }
     }
 
-    currentModuleName?.let { name ->
-        moduleClassPaths[name] = ModuleClassPath(
-            moduleName = name,
-            classPath = currentClassPath.toSet(),
-            sourceDirs = currentSourceDirs.toSet()
+    val result = knownModules.associateWith { moduleName ->
+        ModuleClassPath(
+            moduleName = moduleName,
+            classPath = moduleClassPaths[moduleName]?.toSet() ?: emptySet(),
+            sourceDirs = moduleSourceDirs[moduleName]?.toSet() ?: emptySet()
         )
     }
 
-    return Pair(allDependencies, moduleClassPaths)
+    return Pair(allDependencies, result)
 }
