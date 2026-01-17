@@ -118,7 +118,8 @@ class KotlinLanguageServer(
         val progress = params.workDoneToken?.let { LanguageClientProgress("Workspace folders", it, client) }
 
         classPath.onClassPathReady = {
-            LOG.info("Classpath ready, re-linting open files")
+            LOG.info("Classpath ready, refreshing module assignments and re-linting open files")
+            sourcePath.refreshModuleAssignments()
             textDocuments.lintAllOpenFiles()
         }
 

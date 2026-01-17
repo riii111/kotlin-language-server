@@ -177,17 +177,9 @@ class CompilerClassPath(
     private fun updateModuleRegistry(resolver: ClassPathResolver) {
         moduleRegistry.clear()
 
-        val gradleResolver = findGradleResolver(resolver)
-        if (gradleResolver == null) {
-            LOG.debug("No Gradle resolver found, skipping module registry update")
-            return
-        }
-
+        val gradleResolver = findGradleResolver(resolver) ?: return
         val moduleClassPaths = gradleResolver.moduleClassPaths
-        if (moduleClassPaths.isEmpty()) {
-            LOG.debug("No modules found in Gradle resolver")
-            return
-        }
+        if (moduleClassPaths.isEmpty()) return
 
         for ((name, moduleClassPath) in moduleClassPaths) {
             if (moduleClassPath.sourceDirs.isEmpty()) continue
@@ -203,7 +195,7 @@ class CompilerClassPath(
         }
 
         if (moduleRegistry.size() > 0) {
-            LOG.info("Module registry updated with {} modules: {}", moduleRegistry.size(), moduleRegistry.moduleNames())
+            LOG.info("Module registry updated with {} modules", moduleRegistry.size())
         }
     }
 

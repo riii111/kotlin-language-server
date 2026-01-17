@@ -53,7 +53,7 @@ class SourcePath(
         val language: Language? = null,
         val isTemporary: Boolean = false, // A temporary source file will not be returned by .all()
         var lastSavedFile: KtFile? = null,
-        val moduleId: String? = null,
+        var moduleId: String? = null,
     ) {
         val extension: String? = uri.fileExtension ?: "kt" // TODO: Use language?.associatedFileType?.defaultExtension again
         val isScript: Boolean = extension == "kts"
@@ -123,8 +123,13 @@ class SourcePath(
                 CompiledFile(content, compiledFile!!, compiledContext!!, module!!, allIncludingThis(), cp, isScript, kind)
 
         private fun allIncludingThis(): Collection<KtFile> = parseIfChanged().let {
-            if (isTemporary) (all().asSequence() + sequenceOf(parsed!!)).toList()
-            else all()
+            val moduleFiles = if (cp.moduleRegistry.isEmpty()) {
+                all()
+            } else {
+                allInModule(moduleId)
+            }
+            if (isTemporary) (moduleFiles.asSequence() + sequenceOf(parsed!!)).toList()
+            else moduleFiles
         }
 
         fun clone(): SourceFile = SourceFile(uri, content, path, parsed, compiledFile, compiledContext, module, language, isTemporary, lastSavedFile, moduleId)
@@ -150,7 +155,13 @@ class SourcePath(
         if (uri in files) {
             sourceFile(uri).put(content)
         } else {
-            files[uri] = SourceFile(uri, content, language = language, isTemporary = temporary)
+            val path = uri.filePath
+            val moduleId = if (temporary || path == null) {
+                null
+            } else {
+                cp.moduleRegistry.findModuleForFile(path)?.name
+            }
+            files[uri] = SourceFile(uri, content, language = language, isTemporary = temporary, moduleId = moduleId)
         }
     }
 
@@ -183,16 +194,13 @@ class SourcePath(
             sourceFile(uri).prepareCompiledFile()
 
     fun compileFiles(all: Collection<URI>): BindingContext {
-        // Figure out what has changed
         val sources = all.map { files[it]!! }
         val allChanged = sources.filter { it.content != it.compiledFile?.text }
         val (changedBuildScripts, changedSources) = allChanged.partition { it.kind == CompilationKind.BUILD_SCRIPT }
 
-        // Compile changed files
-        fun compileAndUpdate(changed: List<SourceFile>, kind: CompilationKind): BindingContext? {
+        fun compileAndUpdate(changed: List<SourceFile>, kind: CompilationKind, moduleId: String? = null): BindingContext? {
             if (changed.isEmpty()) return null
 
-            // Get clones of the old files, so we can remove the old declarations from the index
             val oldFiles = changed.mapNotNull {
                 if (it.compiledFile?.text != it.content || it.parsed?.text != it.content) {
                     it.clone()
@@ -201,19 +209,19 @@ class SourcePath(
                 }
             }
 
-            // Parse the files that have changed
             val parse = changed.associateWith { it.apply { parseIfChanged() }.parsed!! }
 
-            // Get all the files. This will parse them if they changed
-            val allFiles = all()
+            val allFiles = if (cp.moduleRegistry.isEmpty() || kind == CompilationKind.BUILD_SCRIPT) {
+                all()
+            } else {
+                allInModule(moduleId)
+            }
             beforeCompileCallback.invoke()
             val (context, module) = cp.compiler.compileKtFiles(parse.values, allFiles, kind)
 
-            // Update cache
             for ((f, parsed) in parse) {
                 parseDataWriteLock.withLock {
                     if (f.parsed == parsed) {
-                        //only updated if the parsed file didn't change:
                         f.compiledFile = parsed
                         f.compiledContext = context
                         f.module = module
@@ -221,7 +229,6 @@ class SourcePath(
                 }
             }
 
-            // Only index normal files, not build files
             if (kind == CompilationKind.DEFAULT) {
                 refreshWorkspaceIndexes(oldFiles, parse.keys.toList())
             }
@@ -230,11 +237,17 @@ class SourcePath(
         }
 
         val buildScriptsContext = compileAndUpdate(changedBuildScripts, CompilationKind.BUILD_SCRIPT)
-        val sourcesContext = compileAndUpdate(changedSources, CompilationKind.DEFAULT)
 
-        // Combine with past compilations
+        val sourcesContexts = if (cp.moduleRegistry.isEmpty()) {
+            listOfNotNull(compileAndUpdate(changedSources, CompilationKind.DEFAULT))
+        } else {
+            changedSources.groupBy { it.moduleId }.mapNotNull { (moduleId, moduleFiles) ->
+                compileAndUpdate(moduleFiles, CompilationKind.DEFAULT, moduleId)
+            }
+        }
+
         val same = sources - allChanged
-        val combined = listOf(buildScriptsContext, sourcesContext).filterNotNull() + same.map { it.compiledContext!! }
+        val combined = listOfNotNull(buildScriptsContext) + sourcesContexts + same.map { it.compiledContext!! }
 
         return CompositeBindingContext.create(combined)
     }
@@ -359,6 +372,23 @@ class SourcePath(
             files.values.forEach { it.compile() }
         }
     }
+
+    fun refreshModuleAssignments() {
+        for (sourceFile in files.values) {
+            if (sourceFile.isTemporary) continue
+            val path = sourceFile.path ?: continue
+            sourceFile.moduleId = cp.moduleRegistry.findModuleForFile(path)?.name
+        }
+    }
+
+    /**
+     * Get parsed trees for all .kt files in a specific module.
+     * If moduleId is null, returns files not belonging to any module.
+     */
+    fun allInModule(moduleId: String?, includeHidden: Boolean = false): Collection<KtFile> =
+            files.values
+                .filter { (includeHidden || !it.isTemporary) && it.moduleId == moduleId }
+                .map { it.apply { parseIfChanged() }.parsed!! }
 
     /**
      * Get parsed trees for all .kt files on source path
