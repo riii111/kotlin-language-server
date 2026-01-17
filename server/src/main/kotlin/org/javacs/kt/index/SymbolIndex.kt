@@ -13,7 +13,6 @@ import org.javacs.kt.database.Locations
 import org.javacs.kt.database.Ranges
 import org.javacs.kt.database.Positions
 import org.javacs.kt.database.SymbolIndexMetadata
-import org.javacs.kt.database.SymbolIndexMetadataEntity
 import org.javacs.kt.database.IndexedJars
 import org.javacs.kt.progress.Progress
 import java.nio.file.Path
@@ -114,18 +113,18 @@ class SymbolIndex(
 
         return try {
             transaction(db) {
-                val metadata = SymbolIndexMetadataEntity.all().firstOrNull()
+                val metadata = SymbolIndexMetadata.selectAll().firstOrNull()
                 if (metadata == null) {
                     LOG.debug("No symbol index metadata found, index needs to be rebuilt")
                     false
-                } else if (metadata.buildFileVersion < currentBuildFileVersion) {
-                    LOG.debug("Symbol index is stale (indexed at version ${metadata.buildFileVersion}, current version $currentBuildFileVersion)")
+                } else if (metadata[SymbolIndexMetadata.buildFileVersion] < currentBuildFileVersion) {
+                    LOG.debug("Symbol index is stale (indexed at version ${metadata[SymbolIndexMetadata.buildFileVersion]}, current version $currentBuildFileVersion)")
                     false
-                } else if (metadata.symbolCount == 0) {
+                } else if (metadata[SymbolIndexMetadata.symbolCount] == 0) {
                     LOG.debug("Symbol index is empty, needs to be rebuilt")
                     false
                 } else {
-                    LOG.debug("Symbol index is valid (${metadata.symbolCount} symbols, indexed at version ${metadata.buildFileVersion})")
+                    LOG.debug("Symbol index is valid (${metadata[SymbolIndexMetadata.symbolCount]} symbols, indexed at version ${metadata[SymbolIndexMetadata.buildFileVersion]})")
                     true
                 }
             }
