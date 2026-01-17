@@ -1,13 +1,51 @@
 allprojects { project ->
     task kotlinLSPProjectDeps { task ->
         doLast {
+            def moduleName = project.name
+
             System.out.println ""
             System.out.println "gradle-version $gradleVersion"
-            System.out.println "kotlin-lsp-project ${project.name}"
+            System.out.println "kotlin-lsp-project $moduleName"
+
+            if (project.hasProperty('sourceSets')) {
+                sourceSets.forEach { sourceSet ->
+                    sourceSet.allSource.srcDirs.forEach { srcDir ->
+                        if (srcDir.exists()) {
+                            System.out.println "kotlin-lsp-sourcedir:$moduleName $srcDir"
+                        }
+                    }
+                }
+            }
+
+            def kotlinExtension = project.extensions.findByName("kotlin")
+            if (kotlinExtension && kotlinExtension.hasProperty("sourceSets")) {
+                kotlinExtension.sourceSets.forEach { sourceSet ->
+                    sourceSet.kotlin.srcDirs.forEach { srcDir ->
+                        if (srcDir.exists()) {
+                            System.out.println "kotlin-lsp-sourcedir:$moduleName $srcDir"
+                        }
+                    }
+                }
+            }
 
             if (project.hasProperty('android')) {
+                project.android.sourceSets.forEach { sourceSet ->
+                    sourceSet.java.srcDirs.forEach { srcDir ->
+                        if (srcDir.exists()) {
+                            System.out.println "kotlin-lsp-sourcedir:$moduleName $srcDir"
+                        }
+                    }
+                    if (sourceSet.hasProperty('kotlin')) {
+                        sourceSet.kotlin.srcDirs.forEach { srcDir ->
+                            if (srcDir.exists()) {
+                                System.out.println "kotlin-lsp-sourcedir:$moduleName $srcDir"
+                            }
+                        }
+                    }
+                }
+
                 project.android.getBootClasspath().each {
-                    System.out.println "kotlin-lsp-gradle $it"
+                    System.out.println "kotlin-lsp-gradle:$moduleName $it"
                 }
 
                 def variants = []
@@ -28,7 +66,7 @@ allprojects { project ->
                         File.separator + variantBase +
                         File.separator + "classes"
 
-                    System.out.println "kotlin-lsp-gradle $buildClasses"
+                    System.out.println "kotlin-lsp-gradle:$moduleName $buildClasses"
 
                     def userClasses = project.getBuildDir().absolutePath +
                         File.separator + "intermediates" +
@@ -36,7 +74,7 @@ allprojects { project ->
                         File.separator + variantBase +
                         File.separator + "compile" + variantBase.capitalize() + "JavaWithJavac" + File.separator + "classes"
 
-                    System.out.println "kotlin-lsp-gradle $userClasses"
+                    System.out.println "kotlin-lsp-gradle:$moduleName $userClasses"
 
                     def userVariantClasses = project.getBuildDir().absolutePath +
                         File.separator + "intermediates" +
@@ -44,32 +82,26 @@ allprojects { project ->
                         File.separator + variantBase +
                         File.separator + "classes"
 
-                    System.out.println "kotlin-lsp-gradle $userVariantClasses"
+                    System.out.println "kotlin-lsp-gradle:$moduleName $userVariantClasses"
 
                     variant.getCompileClasspath().each {
-                        System.out.println "kotlin-lsp-gradle $it"
+                        System.out.println "kotlin-lsp-gradle:$moduleName $it"
                     }
                 }
             } else if (project.hasProperty('sourceSets')) {
-                // Print the list of all dependencies jar files.
                 sourceSets.forEach {
                     it.compileClasspath.forEach {
-                        System.out.println "kotlin-lsp-gradle $it"
+                        System.out.println "kotlin-lsp-gradle:$moduleName $it"
                     }
                 }
             }
 
 
-            // handle kotlin multiplatform style dependencies if any
-            def kotlinExtension = project.extensions.findByName("kotlin")
             if(kotlinExtension && kotlinExtension.hasProperty("targets")) {
-                def kotlinSourceSets = kotlinExtension.sourceSets
-
-                // Print the list of all dependencies jar files.
                 kotlinExtension.targets.names.each {
                     def classpath = configurations["${it}CompileClasspath"]
                     classpath.files.each {
-                        System.out.println "kotlin-lsp-gradle $it"
+                        System.out.println "kotlin-lsp-gradle:$moduleName $it"
                     }
                 }
             }

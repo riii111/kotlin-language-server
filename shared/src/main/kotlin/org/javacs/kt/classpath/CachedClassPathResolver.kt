@@ -33,6 +33,7 @@ internal class CachedClassPathResolver(
     private val db: Database
 ) : ClassPathResolver {
     override val resolverType: String get() = "Cached + ${wrapped.resolverType}"
+    override val wrappedResolvers: List<ClassPathResolver> get() = listOf(wrapped)
 
     private var cachedClassPathEntries: Set<ClassPathEntry>
         get() = transaction(db) {

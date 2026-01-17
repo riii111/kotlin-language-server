@@ -53,6 +53,7 @@ class SourcePath(
         val language: Language? = null,
         val isTemporary: Boolean = false, // A temporary source file will not be returned by .all()
         var lastSavedFile: KtFile? = null,
+        val moduleId: String? = null,
     ) {
         val extension: String? = uri.fileExtension ?: "kt" // TODO: Use language?.associatedFileType?.defaultExtension again
         val isScript: Boolean = extension == "kts"
@@ -126,8 +127,7 @@ class SourcePath(
             else all()
         }
 
-        // Creates a shallow copy
-        fun clone(): SourceFile = SourceFile(uri, content, path, parsed, compiledFile, compiledContext, module, language, isTemporary)
+        fun clone(): SourceFile = SourceFile(uri, content, path, parsed, compiledFile, compiledContext, module, language, isTemporary, lastSavedFile, moduleId)
     }
 
     private fun sourceFile(uri: URI): SourceFile {
