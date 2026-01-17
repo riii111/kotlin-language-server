@@ -37,3 +37,12 @@ Only 2 quick fixes are currently implemented:
 2. **AddMissingImportsQuickFix** - Add imports for unresolved symbols
 
 Other quick fixes (e.g., auto-correct typos, add missing returns) are not yet implemented.
+
+## Multi-module Gradle Support
+
+Supports multi-module Gradle projects with per-module compilation isolation:
+
+- Each module is compiled independently, preventing false positive diagnostics (e.g., `OVERLOAD_RESOLUTION_AMBIGUITY`) when different modules have same-name functions
+- Cross-module imports work via classpath (compiled JARs)
+- Requires `settings.gradle(.kts)` at the project root
+- Non-Gradle projects fall back to single compilation unit
