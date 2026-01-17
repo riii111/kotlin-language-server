@@ -10,15 +10,40 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
+/**
+ * Represents classpath and source directory information for a single Gradle module.
+ */
+data class ModuleClassPath(
+    val moduleName: String,
+    val classPath: Set<Path>,
+    val sourceDirs: Set<Path>
+)
+
 internal class GradleClassPathResolver(private val path: Path, private val includeKotlinDSL: Boolean): ClassPathResolver {
     override val resolverType: String = "Gradle"
     private val projectDirectory: Path get() = path.parent
+
+    // Cached module classpaths from last resolution
+    private var cachedModuleClassPaths: Map<String, ModuleClassPath> = emptyMap()
+
+    /**
+     * Returns the mapping of module names to their classpath and source directory information.
+     * This is populated after classpath resolution.
+     */
+    val moduleClassPaths: Map<String, ModuleClassPath> get() = cachedModuleClassPaths
 
     override val classpath: Set<ClassPathEntry> get() {
         val scripts = listOf("projectClassPathFinder.gradle")
         val tasks = listOf("kotlinLSPProjectDeps")
 
-        return readDependenciesViaGradleCLI(projectDirectory, scripts, tasks)
+        val (dependencies, modules) = readDependenciesAndModulesViaGradleCLI(projectDirectory, scripts, tasks)
+        cachedModuleClassPaths = modules
+
+        if (modules.isNotEmpty()) {
+            LOG.info("Detected {} modules: {}", modules.size, modules.keys)
+        }
+
+        return dependencies
             .apply { if (isNotEmpty()) LOG.info("Successfully resolved dependencies for '${projectDirectory.fileName}' using Gradle") }
             .map { ClassPathEntry(it, null) }.toSet()
     }
@@ -90,6 +115,32 @@ private fun readDependenciesViaGradleCLI(projectDirectory: Path, gradleScripts: 
     return dependencies
 }
 
+/**
+ * Reads dependencies and module information via Gradle CLI.
+ * Returns a pair of (all dependencies, module classpaths map).
+ */
+private fun readDependenciesAndModulesViaGradleCLI(
+    projectDirectory: Path,
+    gradleScripts: List<String>,
+    gradleTasks: List<String>
+): Pair<Set<Path>, Map<String, ModuleClassPath>> {
+    LOG.info("Resolving dependencies for '{}' through Gradle's CLI using tasks {}...", projectDirectory.fileName, gradleTasks)
+
+    val tmpScripts = gradleScripts.map { gradleScriptToTempFile(it, deleteOnExit = false).toPath().toAbsolutePath() }
+    val gradle = getGradleCommand(projectDirectory)
+
+    val command = listOf(gradle.toString()) + tmpScripts.flatMap { listOf("-I", it.toString()) } + gradleTasks + listOf("--console=plain")
+    val (result, moduleClassPaths) = findGradleCLIDependenciesAndModules(command, projectDirectory)
+
+    val dependencies = result
+        .also { LOG.debug("Classpath for task {}", it) }
+        .filter { it.toString().lowercase().endsWith(".jar") || Files.isDirectory(it) }
+        .toSet()
+
+    tmpScripts.forEach(Files::delete)
+    return Pair(dependencies, moduleClassPaths)
+}
+
 private fun findGradleCLIDependencies(command: List<String>, projectDirectory: Path): Set<Path>? {
     val (result, errors) = execAndReadStdoutAndStderr(command, projectDirectory)
     if ("FAILURE: Build failed" in errors) {
@@ -104,8 +155,30 @@ private fun findGradleCLIDependencies(command: List<String>, projectDirectory: P
     return parseGradleCLIDependencies(result)
 }
 
+private fun findGradleCLIDependenciesAndModules(
+    command: List<String>,
+    projectDirectory: Path
+): Pair<Set<Path>, Map<String, ModuleClassPath>> {
+    val (result, errors) = execAndReadStdoutAndStderr(command, projectDirectory)
+    if ("FAILURE: Build failed" in errors) {
+        LOG.warn("Gradle task failed: {}", errors)
+    } else {
+        for (error in errors.lines()) {
+            if ("ERROR: " in error) {
+                LOG.warn("Gradle error: {}", error)
+            }
+        }
+    }
+    return parseGradleCLIOutput(result)
+}
+
 private val artifactPattern by lazy { "kotlin-lsp-gradle (.+)(?:\r?\n)".toRegex() }
 private val gradleErrorWherePattern by lazy { "\\*\\s+Where:[\r\n]+(\\S\\.*)".toRegex() }
+
+// Patterns for module-aware parsing
+private val projectPattern by lazy { "kotlin-lsp-project (.+)".toRegex() }
+private val sourceDirPattern by lazy { "kotlin-lsp-sourcedir (.+)".toRegex() }
+private val classpathPattern by lazy { "kotlin-lsp-gradle (.+)".toRegex() }
 
 private fun parseGradleCLIDependencies(output: String): Set<Path>? {
     LOG.debug(output)
@@ -113,4 +186,81 @@ private fun parseGradleCLIDependencies(output: String): Set<Path>? {
         .mapNotNull { Paths.get(it.groups[1]?.value) }
         .filterNotNull()
     return artifacts.toSet()
+}
+
+/**
+ * Parses Gradle CLI output to extract both dependencies and per-module information.
+ * The output format is:
+ *   kotlin-lsp-project <module-name>
+ *   kotlin-lsp-sourcedir <source-directory>
+ *   kotlin-lsp-gradle <classpath-entry>
+ *   ...
+ *   kotlin-lsp-project <next-module-name>
+ *   ...
+ */
+private fun parseGradleCLIOutput(output: String): Pair<Set<Path>, Map<String, ModuleClassPath>> {
+    LOG.debug(output)
+
+    val allDependencies = mutableSetOf<Path>()
+    val moduleClassPaths = mutableMapOf<String, ModuleClassPath>()
+
+    var currentModuleName: String? = null
+    var currentClassPath = mutableSetOf<Path>()
+    var currentSourceDirs = mutableSetOf<Path>()
+
+    for (line in output.lines()) {
+        val projectMatch = projectPattern.find(line)
+        if (projectMatch != null) {
+            // Save the previous module if exists
+            currentModuleName?.let { name ->
+                moduleClassPaths[name] = ModuleClassPath(
+                    moduleName = name,
+                    classPath = currentClassPath.toSet(),
+                    sourceDirs = currentSourceDirs.toSet()
+                )
+            }
+
+            // Start a new module
+            currentModuleName = projectMatch.groupValues[1].trim()
+            currentClassPath = mutableSetOf()
+            currentSourceDirs = mutableSetOf()
+            continue
+        }
+
+        val sourceDirMatch = sourceDirPattern.find(line)
+        if (sourceDirMatch != null) {
+            val pathStr = sourceDirMatch.groupValues[1].trim()
+            try {
+                val path = Paths.get(pathStr)
+                currentSourceDirs.add(path)
+            } catch (e: Exception) {
+                LOG.warn("Invalid source directory path: {}", pathStr)
+            }
+            continue
+        }
+
+        val classpathMatch = classpathPattern.find(line)
+        if (classpathMatch != null) {
+            val pathStr = classpathMatch.groupValues[1].trim()
+            try {
+                val path = Paths.get(pathStr)
+                currentClassPath.add(path)
+                allDependencies.add(path)
+            } catch (e: Exception) {
+                LOG.warn("Invalid classpath path: {}", pathStr)
+            }
+            continue
+        }
+    }
+
+    // Save the last module
+    currentModuleName?.let { name ->
+        moduleClassPaths[name] = ModuleClassPath(
+            moduleName = name,
+            classPath = currentClassPath.toSet(),
+            sourceDirs = currentSourceDirs.toSet()
+        )
+    }
+
+    return Pair(allDependencies, moduleClassPaths)
 }

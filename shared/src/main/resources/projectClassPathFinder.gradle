@@ -5,7 +5,46 @@ allprojects { project ->
             System.out.println "gradle-version $gradleVersion"
             System.out.println "kotlin-lsp-project ${project.name}"
 
+            // Output source directories for this project
+            if (project.hasProperty('sourceSets')) {
+                sourceSets.forEach { sourceSet ->
+                    sourceSet.allSource.srcDirs.forEach { srcDir ->
+                        if (srcDir.exists()) {
+                            System.out.println "kotlin-lsp-sourcedir $srcDir"
+                        }
+                    }
+                }
+            }
+
+            // Handle kotlin multiplatform source directories
+            def kotlinExtension = project.extensions.findByName("kotlin")
+            if (kotlinExtension && kotlinExtension.hasProperty("sourceSets")) {
+                kotlinExtension.sourceSets.forEach { sourceSet ->
+                    sourceSet.kotlin.srcDirs.forEach { srcDir ->
+                        if (srcDir.exists()) {
+                            System.out.println "kotlin-lsp-sourcedir $srcDir"
+                        }
+                    }
+                }
+            }
+
             if (project.hasProperty('android')) {
+                // Output Android source directories
+                project.android.sourceSets.forEach { sourceSet ->
+                    sourceSet.java.srcDirs.forEach { srcDir ->
+                        if (srcDir.exists()) {
+                            System.out.println "kotlin-lsp-sourcedir $srcDir"
+                        }
+                    }
+                    if (sourceSet.hasProperty('kotlin')) {
+                        sourceSet.kotlin.srcDirs.forEach { srcDir ->
+                            if (srcDir.exists()) {
+                                System.out.println "kotlin-lsp-sourcedir $srcDir"
+                            }
+                        }
+                    }
+                }
+
                 project.android.getBootClasspath().each {
                     System.out.println "kotlin-lsp-gradle $it"
                 }
