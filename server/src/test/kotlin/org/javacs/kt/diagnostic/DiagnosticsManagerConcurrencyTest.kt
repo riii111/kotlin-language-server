@@ -4,10 +4,23 @@ import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.*
 import org.javacs.kt.Configuration
 import org.javacs.kt.SourceFiles
+import org.javacs.kt.SourcePath
+import org.javacs.kt.URIContentProvider
+import org.javacs.kt.ScriptsConfiguration
+import org.javacs.kt.CompilerClassPath
+import org.javacs.kt.CompilerConfiguration
+import org.javacs.kt.CodegenConfiguration
+import org.javacs.kt.IndexingConfiguration
+import org.javacs.kt.ExternalSourcesConfiguration
+import org.javacs.kt.database.DatabaseService
+import org.javacs.kt.externalsources.ClassContentProvider
+import org.javacs.kt.externalsources.ClassPathSourceArchiveProvider
+import org.javacs.kt.externalsources.JdkSourceArchiveProvider
+import org.javacs.kt.externalsources.CompositeSourceArchiveProvider
+import org.javacs.kt.util.TemporaryDirectory
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
-import org.mockito.Mockito.mock
 import java.net.URI
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -17,15 +30,39 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class DiagnosticsManagerConcurrencyTest {
     private lateinit var diagnosticsManager: DiagnosticsManager
+    private lateinit var classPath: CompilerClassPath
+    private lateinit var sourcePath: SourcePath
+    private lateinit var sourceFiles: SourceFiles
+    private lateinit var databaseService: DatabaseService
+    private lateinit var tempDir: TemporaryDirectory
     private val executor = Executors.newFixedThreadPool(8)
 
     @Before
     fun setup() {
-        val config = Configuration()
-        val sourceFiles = mock(SourceFiles::class.java)
+        databaseService = DatabaseService()
+        tempDir = TemporaryDirectory()
+        classPath = CompilerClassPath(
+            CompilerConfiguration(),
+            ScriptsConfiguration(),
+            CodegenConfiguration(),
+            databaseService
+        )
+        val sourceArchiveProvider = CompositeSourceArchiveProvider(
+            JdkSourceArchiveProvider(classPath),
+            ClassPathSourceArchiveProvider(classPath)
+        )
+        val classContentProvider = ClassContentProvider(
+            ExternalSourcesConfiguration(),
+            classPath,
+            tempDir,
+            sourceArchiveProvider
+        )
+        val contentProvider = URIContentProvider(classContentProvider)
+        sourcePath = SourcePath(classPath, contentProvider, IndexingConfiguration(), databaseService)
+        sourceFiles = SourceFiles(sourcePath, contentProvider, ScriptsConfiguration())
         diagnosticsManager = DiagnosticsManager(
             debounceTimeMs = 50,
-            config = config,
+            config = Configuration(),
             sourceFiles = sourceFiles,
             isClassPathReady = { true }
         )
@@ -34,6 +71,8 @@ class DiagnosticsManagerConcurrencyTest {
     @After
     fun teardown() {
         diagnosticsManager.close()
+        classPath.close()
+        tempDir.close()
         executor.shutdown()
         executor.awaitTermination(5, TimeUnit.SECONDS)
     }

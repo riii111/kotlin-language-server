@@ -3,10 +3,14 @@ package org.javacs.kt
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.*
 import org.javacs.kt.database.DatabaseService
+import org.javacs.kt.externalsources.ClassContentProvider
+import org.javacs.kt.externalsources.ClassPathSourceArchiveProvider
+import org.javacs.kt.externalsources.JdkSourceArchiveProvider
+import org.javacs.kt.externalsources.CompositeSourceArchiveProvider
+import org.javacs.kt.util.TemporaryDirectory
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
-import org.mockito.Mockito.*
 import java.net.URI
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -17,32 +21,38 @@ import java.util.concurrent.atomic.AtomicInteger
 class SourcePathConcurrencyTest {
     private lateinit var sourcePath: SourcePath
     private lateinit var classPath: CompilerClassPath
-    private lateinit var contentProvider: URIContentProvider
     private lateinit var databaseService: DatabaseService
+    private lateinit var tempDir: TemporaryDirectory
     private val executor = Executors.newFixedThreadPool(8)
 
     @Before
     fun setup() {
         databaseService = DatabaseService()
+        tempDir = TemporaryDirectory()
         classPath = CompilerClassPath(
             CompilerConfiguration(),
             ScriptsConfiguration(),
             CodegenConfiguration(),
             databaseService
         )
-        contentProvider = mock(URIContentProvider::class.java)
-        `when`(contentProvider.contentOf(any())).thenReturn("// test content")
-        sourcePath = SourcePath(
-            classPath,
-            contentProvider,
-            IndexingConfiguration(),
-            databaseService
+        val sourceArchiveProvider = CompositeSourceArchiveProvider(
+            JdkSourceArchiveProvider(classPath),
+            ClassPathSourceArchiveProvider(classPath)
         )
+        val classContentProvider = ClassContentProvider(
+            ExternalSourcesConfiguration(),
+            classPath,
+            tempDir,
+            sourceArchiveProvider
+        )
+        val contentProvider = URIContentProvider(classContentProvider)
+        sourcePath = SourcePath(classPath, contentProvider, IndexingConfiguration(), databaseService)
     }
 
     @After
     fun teardown() {
         classPath.close()
+        tempDir.close()
         executor.shutdown()
         executor.awaitTermination(5, TimeUnit.SECONDS)
     }
