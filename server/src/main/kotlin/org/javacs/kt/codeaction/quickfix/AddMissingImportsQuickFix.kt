@@ -23,7 +23,7 @@ class AddMissingImportsQuickFix: QuickFix {
             val endCursor = offset(file.content, diagnosticRange.end)
             val symbolName = file.content.substring(startCursor, endCursor)
 
-            getImportAlternatives(symbolName, file.parse, index, file.moduleId).map { (importStr, edit) ->
+            getImportAlternatives(symbolName, file.parse, index).map { (importStr, edit) ->
                 val codeAction = CodeAction()
                 codeAction.title = "Import ${importStr}"
                 codeAction.kind = CodeActionKind.QuickFix
@@ -40,9 +40,9 @@ class AddMissingImportsQuickFix: QuickFix {
             it.code?.left?.trim() == "UNRESOLVED_REFERENCE"
         }
 
-    private fun getImportAlternatives(symbolName: String, file: KtFile, index: SymbolIndex, moduleId: String?): List<Pair<String, TextEdit>> {
+    private fun getImportAlternatives(symbolName: String, file: KtFile, index: SymbolIndex): List<Pair<String, TextEdit>> {
         // wildcard matcher to empty string, because we only want to match exactly the symbol itself, not anything extra
-        val queryResult = index.query(symbolName, suffix = "", moduleId = moduleId)
+        val queryResult = index.query(symbolName, suffix = "")
         
         return queryResult
             .filter {
