@@ -7,7 +7,7 @@ import org.eclipse.lsp4j.services.TextDocumentService
 import org.javacs.kt.codeaction.codeActions
 import org.javacs.kt.completion.completions
 import org.javacs.kt.definition.goToDefinition
-import org.javacs.kt.diagnostic.convertDiagnostic
+import org.javacs.kt.diagnostic.DiagnosticsManager
 import org.javacs.kt.formatting.FormattingService
 import org.javacs.kt.hover.hoverAt
 import org.javacs.kt.position.offset
@@ -21,11 +21,9 @@ import org.javacs.kt.highlight.documentHighlightsAt
 import org.javacs.kt.inlayhints.provideHints
 import org.javacs.kt.symbols.documentSymbols
 import org.javacs.kt.util.AsyncExecutor
-import org.javacs.kt.util.Debouncer
 import org.javacs.kt.util.LspResponseCache
 import org.javacs.kt.util.TemporaryDirectory
 import org.javacs.kt.util.describeURI
-import org.javacs.kt.util.describeURIs
 import org.javacs.kt.util.filePath
 import org.javacs.kt.util.noResult
 import org.javacs.kt.util.parseURI
@@ -35,7 +33,6 @@ import java.io.Closeable
 import java.nio.file.Path
 import java.util.concurrent.Executors
 import java.util.concurrent.CompletableFuture
-import java.time.Duration
 
 class KotlinTextDocumentService(
     private val sf: SourceFiles,
@@ -66,9 +63,17 @@ class KotlinTextDocumentService(
     private val completionCache = LspResponseCache<CompletionList>()
     private val referencesCache = LspResponseCache<List<Location>?>()
 
-    var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
-    val lintTodo = mutableSetOf<URI>()
-    var lintCount = 0
+    val diagnosticsManager = DiagnosticsManager(
+        config.diagnostics.debounceTime,
+        config,
+        sf,
+        { cp.isReady }
+    )
+
+    // Test compatibility passthroughs
+    val debounceLint get() = diagnosticsManager.debouncer
+    val lintTodo get() = diagnosticsManager.pendingFiles
+    val lintCount get() = diagnosticsManager.lintCount
 
     var lintRecompilationCallback: () -> Unit
         get() = sp.beforeCompileCallback
@@ -88,6 +93,14 @@ class KotlinTextDocumentService(
 
     fun connect(client: LanguageClient) {
         this.client = client
+        diagnosticsManager.connect(client)
+        diagnosticsManager.setLintAction { cancelCallback ->
+            val files = diagnosticsManager.clearPending()
+            val context = sp.compileFiles(files)
+            if (!cancelCallback.invoke()) {
+                diagnosticsManager.reportDiagnostics(files, context.diagnostics)
+            }
+        }
     }
 
     private enum class Recompile {
@@ -245,14 +258,14 @@ class KotlinTextDocumentService(
     override fun didOpen(params: DidOpenTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
         sf.open(uri, params.textDocument.text, params.textDocument.version)
-        lintNow(uri)
+        diagnosticsManager.lintImmediately(uri)
     }
 
     override fun didSave(params: DidSaveTextDocumentParams) {
         // Lint after saving to prevent inconsistent diagnostics
         val uri = parseURI(params.textDocument.uri)
-        lintNow(uri)
-        debounceLint.schedule {
+        diagnosticsManager.lintImmediately(uri)
+        diagnosticsManager.debouncer.schedule {
             sp.save(uri)
         }
     }
@@ -269,7 +282,7 @@ class KotlinTextDocumentService(
     override fun didClose(params: DidCloseTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
         sf.close(uri)
-        clearDiagnostics(uri)
+        diagnosticsManager.clearDiagnostics(uri)
     }
 
     override fun formatting(params: DocumentFormattingParams): CompletableFuture<List<TextEdit>> = async.compute {
@@ -288,7 +301,7 @@ class KotlinTextDocumentService(
         completionCache.invalidate(uri)
         referencesCache.clear() // Clear all because any file change can affect cross-file references
         sf.edit(uri, params.textDocument.version, params.contentChanges)
-        lintLater(uri)
+        diagnosticsManager.scheduleLint(uri)
     }
 
     override fun references(position: ReferenceParams): CompletableFuture<List<Location>?> =
@@ -351,12 +364,12 @@ class KotlinTextDocumentService(
         return "${describeURI(position.textDocument.uri)} ${position.position.line + 1}:${position.position.character + 1}"
     }
 
-    public fun updateDebouncer() {
-        debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
+    fun updateDebouncer() {
+        diagnosticsManager.updateDebounceTime(config.diagnostics.debounceTime)
     }
 
     fun lintAll() {
-        debounceLint.submitImmediately {
+        diagnosticsManager.debouncer.submitImmediately {
             sp.compileAllFiles()
             sp.saveAllFiles()
             sp.refreshDependencyIndexes()
@@ -373,75 +386,15 @@ class KotlinTextDocumentService(
         LOG.info("Re-linting {} open files after classpath ready", openFiles.size)
         // Clean ALL cached parse/compile results since compiler environment has changed
         sp.cleanAllFiles()
-        debounceLint.submitImmediately {
+        diagnosticsManager.debouncer.submitImmediately {
             val context = sp.compileFiles(openFiles)
-            reportDiagnostics(openFiles, context.diagnostics)
+            diagnosticsManager.reportDiagnostics(openFiles, context.diagnostics)
         }
-    }
-
-    private fun clearLint(): List<URI> {
-        val result = lintTodo.toList()
-        lintTodo.clear()
-        return result
-    }
-
-    private fun lintLater(uri: URI) {
-        lintTodo.add(uri)
-        debounceLint.schedule(::doLint)
-    }
-
-    private fun lintNow(file: URI) {
-        lintTodo.add(file)
-        debounceLint.submitImmediately(::doLint)
-    }
-
-    private fun doLint(cancelCallback: () -> Boolean) {
-        if (!cp.isReady) {
-            LOG.info("Skipping lint - classpath not ready")
-            return
-        }
-
-        LOG.info("Linting {}", describeURIs(lintTodo))
-        val files = clearLint()
-        val context = sp.compileFiles(files)
-        if (!cancelCallback.invoke()) {
-            reportDiagnostics(files, context.diagnostics)
-        }
-        lintCount++
-    }
-
-    private fun reportDiagnostics(compiled: Collection<URI>, kotlinDiagnostics: Diagnostics) {
-        val langServerDiagnostics = kotlinDiagnostics
-            .flatMap(::convertDiagnostic)
-            .filter { config.diagnostics.enabled && it.second.severity <= config.diagnostics.level }
-        val byFile = langServerDiagnostics.groupBy({ it.first }, { it.second })
-
-        for ((uri, diagnostics) in byFile) {
-            if (sf.isOpen(uri)) {
-                client.publishDiagnostics(PublishDiagnosticsParams(uri.toString(), diagnostics))
-
-                LOG.info("Reported {} diagnostics in {}", diagnostics.size, describeURI(uri))
-            }
-            else LOG.info("Ignore {} diagnostics in {} because it's not open", diagnostics.size, describeURI(uri))
-        }
-
-        val noErrors = compiled - byFile.keys
-        for (file in noErrors) {
-            clearDiagnostics(file)
-
-            LOG.info("No diagnostics in {}", file)
-        }
-
-        lintCount++
-    }
-
-    private fun clearDiagnostics(uri: URI) {
-        client.publishDiagnostics(PublishDiagnosticsParams(uri.toString(), listOf()))
     }
 
     private fun shutdownExecutors(awaitTermination: Boolean) {
         async.shutdown(awaitTermination)
-        debounceLint.shutdown(awaitTermination)
+        diagnosticsManager.close()
         definitionExecutor.shutdown()
         hoverExecutor.shutdown()
         completionExecutor.shutdown()
