@@ -7,7 +7,7 @@ import org.eclipse.lsp4j.services.TextDocumentService
 import org.javacs.kt.codeaction.codeActions
 import org.javacs.kt.completion.completions
 import org.javacs.kt.definition.goToDefinition
-import org.javacs.kt.diagnostic.convertDiagnostic
+import org.javacs.kt.diagnostic.DiagnosticsManager
 import org.javacs.kt.formatting.FormattingService
 import org.javacs.kt.hover.hoverAt
 import org.javacs.kt.position.offset
@@ -20,22 +20,18 @@ import org.javacs.kt.rename.renameSymbol
 import org.javacs.kt.highlight.documentHighlightsAt
 import org.javacs.kt.inlayhints.provideHints
 import org.javacs.kt.symbols.documentSymbols
-import org.javacs.kt.util.AsyncExecutor
-import org.javacs.kt.util.Debouncer
-import org.javacs.kt.util.LspResponseCache
+import org.javacs.kt.util.LspCacheManager
+import org.javacs.kt.util.LspExecutorPool
+import org.javacs.kt.util.LspOperation
 import org.javacs.kt.util.TemporaryDirectory
 import org.javacs.kt.util.describeURI
-import org.javacs.kt.util.describeURIs
 import org.javacs.kt.util.filePath
 import org.javacs.kt.util.noResult
 import org.javacs.kt.util.parseURI
-import org.jetbrains.kotlin.resolve.diagnostics.Diagnostics
 import java.net.URI
 import java.io.Closeable
 import java.nio.file.Path
-import java.util.concurrent.Executors
 import java.util.concurrent.CompletableFuture
-import java.time.Duration
 
 class KotlinTextDocumentService(
     private val sf: SourceFiles,
@@ -46,48 +42,42 @@ class KotlinTextDocumentService(
     private val cp: CompilerClassPath
 ) : TextDocumentService, Closeable {
     private lateinit var client: LanguageClient
-    private val async = AsyncExecutor()
-    private val definitionExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "kls-definition").apply { isDaemon = true }
-    }
-    private val hoverExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "kls-hover").apply { isDaemon = true }
-    }
-    private val completionExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "kls-completion").apply { isDaemon = true }
-    }
-    private val referencesExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "kls-references").apply { isDaemon = true }
-    }
+    private val executorPool = LspExecutorPool()
+    private val cacheManager = LspCacheManager()
     private val formattingService = FormattingService(config.formatting)
 
-    private val definitionCache = LspResponseCache<Location?>()
-    private val hoverCache = LspResponseCache<Hover?>()
-    private val completionCache = LspResponseCache<CompletionList>()
-    private val referencesCache = LspResponseCache<List<Location>?>()
+    val diagnosticsManager = DiagnosticsManager(
+        config.diagnostics.debounceTime,
+        config,
+        sf,
+        { cp.isReady }
+    )
 
-    var debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
-    val lintTodo = mutableSetOf<URI>()
-    var lintCount = 0
+    // Test compatibility passthroughs
+    val debounceLint get() = diagnosticsManager.debouncer
+    val lintTodo get() = diagnosticsManager.pendingFiles
+    val lintCount get() = diagnosticsManager.lintCount
 
     var lintRecompilationCallback: () -> Unit
         get() = sp.beforeCompileCallback
         set(callback) { sp.beforeCompileCallback = callback }
 
-    private val TextDocumentItem.filePath: Path?
-        get() = parseURI(uri).filePath
-
     private val TextDocumentIdentifier.filePath: Path?
         get() = parseURI(uri).filePath
-
-    private val TextDocumentIdentifier.isKotlinScript: Boolean
-        get() = uri.endsWith(".kts")
 
     private val TextDocumentIdentifier.content: String
         get() = sp.content(parseURI(uri))
 
     fun connect(client: LanguageClient) {
         this.client = client
+        diagnosticsManager.connect(client)
+        diagnosticsManager.setLintAction { cancelCallback ->
+            val files = diagnosticsManager.clearPending()
+            val context = sp.compileFiles(files)
+            if (!cancelCallback.invoke()) {
+                diagnosticsManager.reportDiagnostics(files, context.diagnostics)
+            }
+        }
     }
 
     private enum class Recompile {
@@ -115,18 +105,18 @@ class KotlinTextDocumentService(
         return Pair(compiled, offset)
     }
 
-    override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> = async.compute {
+    override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> = executorPool.compute {
         val (file, _) = recover(params.textDocument.uri, params.range.start, Recompile.NEVER) ?: return@compute emptyList()
         codeActions(file, sp.index, params.range, params.context)
     }
 
-    override fun inlayHint(params: InlayHintParams): CompletableFuture<List<InlayHint>> = async.compute {
+    override fun inlayHint(params: InlayHintParams): CompletableFuture<List<InlayHint>> = executorPool.compute {
         val (file, _) = recover(params.textDocument.uri, params.range.start, Recompile.ALWAYS) ?: return@compute emptyList()
         provideHints(file, config.inlayHints)
     }
 
     override fun hover(position: HoverParams): CompletableFuture<Hover?> =
-        CompletableFuture.supplyAsync({
+        executorPool.submit(LspOperation.HOVER) {
             reportTime {
                 LOG.info("Hovering at {}", describePosition(position))
                 val uri = parseURI(position.textDocument.uri)
@@ -134,21 +124,21 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                hoverCache.get(uri, line, character, fileVersion)?.let { cached ->
+                cacheManager.getHover(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Hover cache hit")
-                    return@supplyAsync cached.value
+                    return@submit cached.value
                 }
 
-                val (file, cursor) = recover(position, Recompile.NEVER) ?: return@supplyAsync null
+                val (file, cursor) = recover(position, Recompile.NEVER) ?: return@submit null
                 val result = hoverAt(file, cursor)
 
-                hoverCache.put(uri, line, character, fileVersion, result)
+                cacheManager.putHover(uri, line, character, fileVersion, result)
 
                 result ?: noResult("No hover found at ${describePosition(position)}", null)
             }
-        }, hoverExecutor)
+        }
 
-    override fun documentHighlight(position: DocumentHighlightParams): CompletableFuture<List<DocumentHighlight>> = async.compute {
+    override fun documentHighlight(position: DocumentHighlightParams): CompletableFuture<List<DocumentHighlight>> = executorPool.compute {
         val (file, cursor) = recover(position.textDocument.uri, position.position, Recompile.NEVER) ?: return@compute emptyList()
         documentHighlightsAt(file, cursor)
     }
@@ -158,7 +148,7 @@ class KotlinTextDocumentService(
     }
 
     override fun definition(position: DefinitionParams): CompletableFuture<Either<List<Location>, List<LocationLink>>> =
-        CompletableFuture.supplyAsync({
+        executorPool.submit(LspOperation.DEFINITION) {
             reportTime {
                 LOG.info("Go-to-definition at {}", describePosition(position))
                 val uri = parseURI(position.textDocument.uri)
@@ -166,25 +156,25 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                definitionCache.get(uri, line, character, fileVersion)?.let { cached ->
+                cacheManager.getDefinition(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Definition cache hit")
-                    return@supplyAsync cached.value?.let(::listOf)?.let { Either.forLeft(it) }
+                    return@submit cached.value?.let(::listOf)?.let { Either.forLeft(it) }
                         ?: Either.forLeft(emptyList())
                 }
 
                 val (file, cursor) = recover(position, Recompile.NEVER)
-                    ?: return@supplyAsync Either.forLeft(emptyList())
+                    ?: return@submit Either.forLeft(emptyList())
                 val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
 
-                definitionCache.put(uri, line, character, fileVersion, result)
+                cacheManager.putDefinition(uri, line, character, fileVersion, result)
 
                 result?.let(::listOf)
                     ?.let { Either.forLeft<List<Location>, List<LocationLink>>(it) }
                     ?: noResult("Couldn't find definition at ${describePosition(position)}", Either.forLeft(emptyList()))
             }
-        }, definitionExecutor)
+        }
 
-    override fun rangeFormatting(params: DocumentRangeFormattingParams): CompletableFuture<List<TextEdit>> = async.compute {
+    override fun rangeFormatting(params: DocumentRangeFormattingParams): CompletableFuture<List<TextEdit>> = executorPool.compute {
         val code = extractRange(params.textDocument.content, params.range)
         listOf(TextEdit(
             params.range,
@@ -196,13 +186,13 @@ class KotlinTextDocumentService(
         TODO("not implemented")
     }
 
-    override fun rename(params: RenameParams) = async.compute {
+    override fun rename(params: RenameParams) = executorPool.compute {
         val (file, cursor) = recover(params, Recompile.NEVER) ?: return@compute null
         renameSymbol(file, cursor, sp, params.newName)
     }
 
     override fun completion(position: CompletionParams): CompletableFuture<Either<List<CompletionItem>, CompletionList>> =
-        CompletableFuture.supplyAsync({
+        executorPool.submit(LspOperation.COMPLETION) {
             reportTime {
                 LOG.info("Completing at {}", describePosition(position))
                 val uri = parseURI(position.textDocument.uri)
@@ -210,28 +200,28 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                completionCache.get(uri, line, character, fileVersion)?.let { cached ->
+                cacheManager.getCompletion(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Completion cache hit with {} items", cached.value.items.size)
-                    return@supplyAsync Either.forRight(cached.value)
+                    return@submit Either.forRight(cached.value)
                 }
 
                 val (file, cursor) = recover(position, Recompile.NEVER)
-                    ?: return@supplyAsync Either.forRight(CompletionList()) // TODO: Investigate when to recompile
+                    ?: return@submit Either.forRight(CompletionList()) // TODO: Investigate when to recompile
                 val result = completions(file, cursor, sp.index, config.completion)
 
-                completionCache.put(uri, line, character, fileVersion, result)
+                cacheManager.putCompletion(uri, line, character, fileVersion, result)
 
                 LOG.info("Found {} items", result.items.size)
                 Either.forRight(result)
             }
-        }, completionExecutor)
+        }
 
     override fun resolveCompletionItem(unresolved: CompletionItem): CompletableFuture<CompletionItem> {
         TODO("not implemented")
     }
 
     @Suppress("DEPRECATION")
-    override fun documentSymbol(params: DocumentSymbolParams): CompletableFuture<List<Either<SymbolInformation, DocumentSymbol>>> = async.compute {
+    override fun documentSymbol(params: DocumentSymbolParams): CompletableFuture<List<Either<SymbolInformation, DocumentSymbol>>> = executorPool.compute {
         LOG.info("Find symbols in {}", describeURI(params.textDocument.uri))
 
         reportTime {
@@ -245,19 +235,19 @@ class KotlinTextDocumentService(
     override fun didOpen(params: DidOpenTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
         sf.open(uri, params.textDocument.text, params.textDocument.version)
-        lintNow(uri)
+        diagnosticsManager.lintImmediately(uri)
     }
 
     override fun didSave(params: DidSaveTextDocumentParams) {
         // Lint after saving to prevent inconsistent diagnostics
         val uri = parseURI(params.textDocument.uri)
-        lintNow(uri)
-        debounceLint.schedule {
+        diagnosticsManager.lintImmediately(uri)
+        diagnosticsManager.debouncer.schedule {
             sp.save(uri)
         }
     }
 
-    override fun signatureHelp(position: SignatureHelpParams): CompletableFuture<SignatureHelp?> = async.compute {
+    override fun signatureHelp(position: SignatureHelpParams): CompletableFuture<SignatureHelp?> = executorPool.compute {
         reportTime {
             LOG.info("Signature help at {}", describePosition(position))
 
@@ -269,10 +259,10 @@ class KotlinTextDocumentService(
     override fun didClose(params: DidCloseTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
         sf.close(uri)
-        clearDiagnostics(uri)
+        diagnosticsManager.clearDiagnostics(uri)
     }
 
-    override fun formatting(params: DocumentFormattingParams): CompletableFuture<List<TextEdit>> = async.compute {
+    override fun formatting(params: DocumentFormattingParams): CompletableFuture<List<TextEdit>> = executorPool.compute {
         val code = params.textDocument.content
         LOG.info("Formatting {}", describeURI(params.textDocument.uri))
         listOf(TextEdit(
@@ -283,24 +273,22 @@ class KotlinTextDocumentService(
 
     override fun didChange(params: DidChangeTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
-        definitionCache.invalidate(uri)
-        hoverCache.invalidate(uri)
-        completionCache.invalidate(uri)
-        referencesCache.clear() // Clear all because any file change can affect cross-file references
+        cacheManager.invalidateFile(uri)
+        cacheManager.clearAllReferences() // Clear all because any file change can affect cross-file references
         sf.edit(uri, params.textDocument.version, params.contentChanges)
-        lintLater(uri)
+        diagnosticsManager.scheduleLint(uri)
     }
 
     override fun references(position: ReferenceParams): CompletableFuture<List<Location>?> =
-        CompletableFuture.supplyAsync({
+        executorPool.submit(LspOperation.REFERENCES) {
             val uri = parseURI(position.textDocument.uri)
             val fileVersion = sf.getVersion(uri)
             val line = position.position.line
             val character = position.position.character
 
-            referencesCache.get(uri, line, character, fileVersion)?.let { cached ->
+            cacheManager.getReferences(uri, line, character, fileVersion)?.let { cached ->
                 LOG.info("References cache hit with {} locations", cached.value?.size ?: 0)
-                return@supplyAsync cached.value
+                return@submit cached.value
             }
 
             val result = position.textDocument.filePath
@@ -310,12 +298,12 @@ class KotlinTextDocumentService(
                     findReferences(file, cursorOffset, sp)
                 }
 
-            referencesCache.put(uri, line, character, fileVersion, result)
+            cacheManager.putReferences(uri, line, character, fileVersion, result)
 
             result
-        }, referencesExecutor)
+        }
 
-    override fun semanticTokensFull(params: SemanticTokensParams) = async.compute {
+    override fun semanticTokensFull(params: SemanticTokensParams) = executorPool.compute {
         LOG.info("Full semantic tokens in {}", describeURI(params.textDocument.uri))
 
         reportTime {
@@ -329,7 +317,7 @@ class KotlinTextDocumentService(
         }
     }
 
-    override fun semanticTokensRange(params: SemanticTokensRangeParams) = async.compute {
+    override fun semanticTokensRange(params: SemanticTokensRangeParams) = executorPool.compute {
         LOG.info("Ranged semantic tokens in {}", describeURI(params.textDocument.uri))
 
         reportTime {
@@ -351,12 +339,12 @@ class KotlinTextDocumentService(
         return "${describeURI(position.textDocument.uri)} ${position.position.line + 1}:${position.position.character + 1}"
     }
 
-    public fun updateDebouncer() {
-        debounceLint = Debouncer(Duration.ofMillis(config.diagnostics.debounceTime))
+    fun updateDebouncer() {
+        diagnosticsManager.updateDebounceTime(config.diagnostics.debounceTime)
     }
 
     fun lintAll() {
-        debounceLint.submitImmediately {
+        diagnosticsManager.debouncer.submitImmediately {
             sp.compileAllFiles()
             sp.saveAllFiles()
             sp.refreshDependencyIndexes()
@@ -373,83 +361,15 @@ class KotlinTextDocumentService(
         LOG.info("Re-linting {} open files after classpath ready", openFiles.size)
         // Clean ALL cached parse/compile results since compiler environment has changed
         sp.cleanAllFiles()
-        debounceLint.submitImmediately {
+        diagnosticsManager.debouncer.submitImmediately {
             val context = sp.compileFiles(openFiles)
-            reportDiagnostics(openFiles, context.diagnostics)
+            diagnosticsManager.reportDiagnostics(openFiles, context.diagnostics)
         }
-    }
-
-    private fun clearLint(): List<URI> {
-        val result = lintTodo.toList()
-        lintTodo.clear()
-        return result
-    }
-
-    private fun lintLater(uri: URI) {
-        lintTodo.add(uri)
-        debounceLint.schedule(::doLint)
-    }
-
-    private fun lintNow(file: URI) {
-        lintTodo.add(file)
-        debounceLint.submitImmediately(::doLint)
-    }
-
-    private fun doLint(cancelCallback: () -> Boolean) {
-        if (!cp.isReady) {
-            LOG.info("Skipping lint - classpath not ready")
-            return
-        }
-
-        LOG.info("Linting {}", describeURIs(lintTodo))
-        val files = clearLint()
-        val context = sp.compileFiles(files)
-        if (!cancelCallback.invoke()) {
-            reportDiagnostics(files, context.diagnostics)
-        }
-        lintCount++
-    }
-
-    private fun reportDiagnostics(compiled: Collection<URI>, kotlinDiagnostics: Diagnostics) {
-        val langServerDiagnostics = kotlinDiagnostics
-            .flatMap(::convertDiagnostic)
-            .filter { config.diagnostics.enabled && it.second.severity <= config.diagnostics.level }
-        val byFile = langServerDiagnostics.groupBy({ it.first }, { it.second })
-
-        for ((uri, diagnostics) in byFile) {
-            if (sf.isOpen(uri)) {
-                client.publishDiagnostics(PublishDiagnosticsParams(uri.toString(), diagnostics))
-
-                LOG.info("Reported {} diagnostics in {}", diagnostics.size, describeURI(uri))
-            }
-            else LOG.info("Ignore {} diagnostics in {} because it's not open", diagnostics.size, describeURI(uri))
-        }
-
-        val noErrors = compiled - byFile.keys
-        for (file in noErrors) {
-            clearDiagnostics(file)
-
-            LOG.info("No diagnostics in {}", file)
-        }
-
-        lintCount++
-    }
-
-    private fun clearDiagnostics(uri: URI) {
-        client.publishDiagnostics(PublishDiagnosticsParams(uri.toString(), listOf()))
-    }
-
-    private fun shutdownExecutors(awaitTermination: Boolean) {
-        async.shutdown(awaitTermination)
-        debounceLint.shutdown(awaitTermination)
-        definitionExecutor.shutdown()
-        hoverExecutor.shutdown()
-        completionExecutor.shutdown()
-        referencesExecutor.shutdown()
     }
 
     override fun close() {
-        shutdownExecutors(awaitTermination = true)
+        executorPool.close()
+        diagnosticsManager.close()
     }
 }
 
