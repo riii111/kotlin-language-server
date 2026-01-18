@@ -9,6 +9,7 @@ import org.javacs.kt.externalsources.JdkSourceArchiveProvider
 import org.javacs.kt.externalsources.CompositeSourceArchiveProvider
 import org.javacs.kt.util.TemporaryDirectory
 import org.junit.After
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import java.net.URI
@@ -75,21 +76,27 @@ class MultiModuleDefinitionTest {
     }
 
     @Test
-    fun `refreshModuleAssignments invalidates compiled file when moduleId changes`() {
+    fun `refreshModuleAssignments reassigns moduleId when modules are registered after file addition`() {
         val testResources = testResourcesRoot()
         val multimoduleRoot = testResources.resolve("multimodule")
         val fileA = multimoduleRoot.resolve("moduleA/src/main/kotlin/com/example/a/Helper.kt")
 
-        classPath.addWorkspaceRoot(multimoduleRoot)
-        classPath.waitForResolution()
-
+        // Add file before module registry is populated (simulates LSP startup scenario)
         val content = fileA.toFile().readText()
         sourcePath.put(fileA.toUri(), content, null)
 
-        sourcePath.currentVersion(fileA.toUri())
+        // Now resolve classpath which populates moduleRegistry
+        classPath.addWorkspaceRoot(multimoduleRoot)
+        classPath.waitForResolution()
+
+        // Skip if Gradle resolution didn't detect modules (CI environment may not have Gradle)
+        assumeTrue(
+            "Skipping: moduleRegistry is empty (Gradle resolution may have failed)",
+            !classPath.moduleRegistry.isEmpty()
+        )
 
         val count = sourcePath.refreshModuleAssignments()
 
-        assertThat("moduleId assignment should work with multi-module setup", count, greaterThanOrEqualTo(0))
+        assertThat("File should be reassigned to detected module", count, greaterThan(0))
     }
 }
