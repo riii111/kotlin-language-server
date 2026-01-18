@@ -59,6 +59,7 @@ class SourcePath(
         val isTemporary: Boolean = false, // A temporary source file will not be returned by .all()
         var lastSavedFile: KtFile? = null,
         var moduleId: String? = null,
+        var compiledGeneration: Long = 0L,
     ) {
         val extension: String? = uri.fileExtension ?: "kt" // TODO: Use language?.associatedFileType?.defaultExtension again
         val isScript: Boolean = extension == "kts"
@@ -91,7 +92,7 @@ class SourcePath(
         fun compileIfNull() = parseIfChanged().apply { doCompileIfNull() }
 
         private fun doCompileIfNull() {
-            if (compiledFile == null) {
+            if (compiledFile == null || compiledGeneration != cp.classpathGeneration) {
                 doCompileIfChanged()
             }
         }
@@ -110,6 +111,7 @@ class SourcePath(
                 compiledContext = context
                 this.module = module
                 compiledFile = parsed
+                compiledGeneration = cp.classpathGeneration
             }
 
             indexingService.refreshWorkspaceIndexes(
@@ -120,7 +122,7 @@ class SourcePath(
         }
 
         private fun doCompileIfChanged() {
-            if (parsed?.text != compiledFile?.text) {
+            if (parsed?.text != compiledFile?.text || compiledGeneration != cp.classpathGeneration) {
                 doCompile()
             }
         }
@@ -141,7 +143,7 @@ class SourcePath(
             else moduleFiles
         }
 
-        fun clone(): SourceFile = SourceFile(uri, content, path, parsed, compiledFile, compiledContext, module, language, isTemporary, lastSavedFile, moduleId)
+        fun clone(): SourceFile = SourceFile(uri, content, path, parsed, compiledFile, compiledContext, module, language, isTemporary, lastSavedFile, moduleId, compiledGeneration)
     }
 
     private fun sourceFile(uri: URI): SourceFile {
@@ -381,13 +383,30 @@ class SourcePath(
         }
     }
 
-    fun refreshModuleAssignments() {
+    fun refreshModuleAssignments(): Int {
         val snapshot = filesLock.read { files.values.toList() }
+        var reassignedCount = 0
+        val oldModuleIds = mutableSetOf<String>()
+
         for (sourceFile in snapshot) {
             if (sourceFile.isTemporary) continue
             val path = sourceFile.path ?: continue
-            sourceFile.moduleId = cp.moduleRegistry.findModuleForFile(path)?.name
+            val newModuleId = cp.moduleRegistry.findModuleForFile(path)?.name
+            if (newModuleId != sourceFile.moduleId) {
+                sourceFile.moduleId?.let { oldModuleIds.add(it) }
+                sourceFile.moduleId = newModuleId
+                sourceFile.clean()
+                reassignedCount++
+            }
         }
+
+        if (indexEnabled && oldModuleIds.isNotEmpty()) {
+            for (oldModuleId in oldModuleIds) {
+                index.removeSymbolsFromModule(oldModuleId)
+            }
+        }
+
+        return reassignedCount
     }
 
     /**

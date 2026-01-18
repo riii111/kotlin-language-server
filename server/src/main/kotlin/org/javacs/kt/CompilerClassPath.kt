@@ -118,6 +118,10 @@ class CompilerClassPath(
     var lastClassPathDiff: ClassPathDiff? = null
         private set
 
+    @Volatile
+    var classpathGeneration: Long = 0L
+        private set
+
     // TODO: Fetch class path and build script class path concurrently
     private fun refresh(
         updateClassPath: Boolean = true,
@@ -183,6 +187,8 @@ class CompilerClassPath(
                 outputDirectory
             )
             updateCompilerConfiguration()
+            classpathGeneration++
+            LOG.info("Classpath generation incremented to {}", classpathGeneration)
         }
 
         return refreshCompiler

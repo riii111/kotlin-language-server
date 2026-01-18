@@ -164,7 +164,7 @@ class KotlinTextDocumentService(
 
                 val (file, cursor) = recover(position, Recompile.NEVER)
                     ?: return@submit Either.forLeft(emptyList())
-                val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
+                val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp, sp)
 
                 cacheManager.putDefinition(uri, line, character, fileVersion, result)
 
@@ -359,7 +359,7 @@ class KotlinTextDocumentService(
         }
 
         LOG.info("Re-linting {} open files after classpath ready", openFiles.size)
-        // Clean ALL cached parse/compile results since compiler environment has changed
+        cacheManager.clearAll()
         sp.cleanAllFiles()
         diagnosticsManager.debouncer.submitImmediately {
             val context = sp.compileFiles(openFiles)

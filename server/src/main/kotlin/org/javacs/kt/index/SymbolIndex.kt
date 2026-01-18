@@ -605,6 +605,49 @@ class SymbolIndex(
         }
     }
 
+    /**
+     * Find the source location of a symbol by its fully qualified name.
+     * Returns null if not found or if the symbol is from a JAR/class file.
+     * This is used to prefer workspace sources over decompiled JARs in go-to-definition.
+     */
+    fun findSourceLocation(fqName: FqName): org.eclipse.lsp4j.Location? {
+        val db = databaseService.db ?: return null
+
+        val readLock = indexLock.readLock()
+        val lockAcquired = try {
+            readLock.tryLock(INDEX_QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        }
+
+        if (!lockAcquired) {
+            return null
+        }
+
+        try {
+            return transaction(db) {
+                SymbolEntity.find { Symbols.fqName eq fqName.asString() }
+                    .firstOrNull()
+                    ?.location
+                    ?.takeIf { loc ->
+                        !loc.uri.contains(".jar") && !loc.uri.contains(".class")
+                    }
+                    ?.let { loc ->
+                        org.eclipse.lsp4j.Location(
+                            loc.uri,
+                            org.eclipse.lsp4j.Range(
+                                org.eclipse.lsp4j.Position(loc.range.start.line, loc.range.start.character),
+                                org.eclipse.lsp4j.Position(loc.range.end.line, loc.range.end.character)
+                            )
+                        )
+                    }
+            }
+        } finally {
+            readLock.unlock()
+        }
+    }
+
     private fun collectAllPackages(module: ModuleDescriptor): List<FqName> {
         val result = mutableListOf<FqName>()
         fun collect(pkgName: FqName) {
