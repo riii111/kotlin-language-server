@@ -1,12 +1,11 @@
 package org.javacs.kt
 
 import org.javacs.kt.compiler.CompilationKind
-import org.javacs.kt.util.AsyncExecutor
 import org.javacs.kt.util.fileExtension
 import org.javacs.kt.util.filePath
 import org.javacs.kt.util.describeURI
+import org.javacs.kt.index.IndexingService
 import org.javacs.kt.index.SymbolIndex
-import org.javacs.kt.index.JarScanner
 import org.javacs.kt.progress.Progress
 import com.intellij.lang.Language
 import org.javacs.kt.database.DatabaseService
@@ -30,16 +29,16 @@ class SourcePath(
     private val files = mutableMapOf<URI, SourceFile>()
     private val parseDataWriteLock = ReentrantLock()
 
-    private val indexAsync = AsyncExecutor()
+    private val indexingService = IndexingService(SymbolIndex(databaseService), indexingConfig)
     var indexEnabled: Boolean by indexingConfig::enabled
-    val index = SymbolIndex(databaseService)
+    val index: SymbolIndex get() = indexingService.getIndex()
 
     var beforeCompileCallback: () -> Unit = {}
 
     var progressFactory: Progress.Factory = Progress.Factory.None
         set(factory: Progress.Factory) {
             field = factory
-            index.progressFactory = factory
+            indexingService.progressFactory = factory
         }
 
     private inner class SourceFile(
@@ -107,7 +106,9 @@ class SourcePath(
                 compiledFile = parsed
             }
 
-            refreshWorkspaceIndexes(listOfNotNull(oldFile), listOfNotNull(this))
+            val oldDeclarations = getDeclarationDescriptors(listOfNotNull(oldFile))
+            val newDeclarations = getDeclarationDescriptors(listOfNotNull(this))
+            indexingService.refreshWorkspaceIndexes(oldDeclarations, newDeclarations, moduleId)
         }
 
         private fun doCompileIfChanged() {
@@ -176,7 +177,8 @@ class SourcePath(
 
     fun delete(uri: URI) {
         files[uri]?.let {
-            refreshWorkspaceIndexes(listOf(it), listOf())
+            val oldDeclarations = getDeclarationDescriptors(listOf(it))
+            indexingService.refreshWorkspaceIndexes(oldDeclarations, emptySequence(), it.moduleId)
             cp.compiler.removeGeneratedCode(listOfNotNull(it.lastSavedFile))
         }
 
@@ -235,7 +237,9 @@ class SourcePath(
             }
 
             if (kind == CompilationKind.DEFAULT) {
-                refreshWorkspaceIndexes(oldFiles, parse.keys.toList())
+                val oldDeclarations = getDeclarationDescriptors(oldFiles)
+                val newDeclarations = getDeclarationDescriptors(parse.keys.toList())
+                indexingService.refreshWorkspaceIndexes(oldDeclarations, newDeclarations, moduleId)
             }
 
             return context
@@ -311,57 +315,23 @@ class SourcePath(
         if (module != null) {
             val diff = cp.lastClassPathDiff
             if (diff != null && diff.hasChanges) {
-                refreshDependencyIndexesIncrementally(diff)
+                indexingService.refreshDependencyIndexesIncrementally(diff, module)
             } else {
-                refreshDependencyIndexes(module, skipIfValid = true)
+                val declarations = getDeclarationDescriptors(files.values)
+                indexingService.refreshDependencyIndexes(
+                    module,
+                    declarations,
+                    cp.currentBuildFileVersion,
+                    skipIfValid = true,
+                    indexingConfig.batchSize
+                )
             }
         }
     }
 
-    private fun refreshWorkspaceIndexes(oldFiles: List<SourceFile>, newFiles: List<SourceFile>) = indexAsync.execute {
-        if (indexEnabled) {
-            // Group files by moduleId to update indexes per module
-            val oldByModule = oldFiles.groupBy { it.moduleId }
-            val newByModule = newFiles.groupBy { it.moduleId }
-            val allModuleIds = (oldByModule.keys + newByModule.keys).distinct()
-
-            for (moduleId in allModuleIds) {
-                val oldDeclarations = getDeclarationDescriptors(oldByModule[moduleId] ?: emptyList())
-                val newDeclarations = getDeclarationDescriptors(newByModule[moduleId] ?: emptyList())
-                index.updateIndexes(oldDeclarations, newDeclarations, moduleId)
-            }
-        }
-    }
-
-    private fun refreshDependencyIndexes(module: ModuleDescriptor, skipIfValid: Boolean = false) = indexAsync.execute {
-        if (indexEnabled) {
-            val declarations = getDeclarationDescriptors(files.values)
-            val buildFileVersion = cp.currentBuildFileVersion
-            index.refresh(module, declarations, buildFileVersion, skipIfValid, indexingConfig.batchSize)
-        }
-    }
-
-    fun refreshDependencyIndexesIncrementally(diff: ClassPathDiff) = indexAsync.execute {
-        if (!indexEnabled) return@execute
-
+    fun refreshDependencyIndexesIncrementally(diff: ClassPathDiff) {
         val module = files.values.firstOrNull { it.module != null }?.module
-        if (module == null) {
-            LOG.warn("No module available for incremental indexing")
-            return@execute
-        }
-
-        val removedJars = diff.removed.map { it.compiledJar }
-        val addedJars = diff.added.map { it.compiledJar }
-
-        if (removedJars.isNotEmpty()) {
-            index.removeSymbolsFromJars(removedJars)
-        }
-
-        if (addedJars.isNotEmpty()) {
-            val jarScanner = JarScanner()
-            val packageToJarsMap = jarScanner.buildPackageToJarsMap(addedJars)
-            index.indexJars(addedJars, module, packageToJarsMap, jarScanner)
-        }
+        indexingService.refreshDependencyIndexesIncrementally(diff, module)
     }
 
     private fun getDeclarationDescriptors(files: Collection<SourceFile>) =
