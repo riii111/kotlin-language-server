@@ -24,7 +24,12 @@ class DiagnosticsManager(
     var debouncer = Debouncer(Duration.ofMillis(debounceTimeMs))
         private set
 
-    val pendingFiles = mutableSetOf<URI>()
+    private val pendingFilesLock = Any()
+    private val pendingFiles = mutableSetOf<URI>()
+
+    val pendingFilesSnapshot: Set<URI>
+        get() = synchronized(pendingFilesLock) { pendingFiles.toSet() }
+
     var lintCount = 0
         private set
 
@@ -45,12 +50,12 @@ class DiagnosticsManager(
     }
 
     fun scheduleLint(uri: URI) {
-        pendingFiles.add(uri)
+        synchronized(pendingFilesLock) { pendingFiles.add(uri) }
         debouncer.schedule(::doLint)
     }
 
     fun lintImmediately(uri: URI) {
-        pendingFiles.add(uri)
+        synchronized(pendingFilesLock) { pendingFiles.add(uri) }
         debouncer.submitImmediately(::doLint)
     }
 
@@ -58,10 +63,8 @@ class DiagnosticsManager(
         debouncer.waitForPendingTask()
     }
 
-    fun clearPending(): List<URI> {
-        val result = pendingFiles.toList()
-        pendingFiles.clear()
-        return result
+    fun clearPending(): List<URI> = synchronized(pendingFilesLock) {
+        pendingFiles.toList().also { pendingFiles.clear() }
     }
 
     private fun doLint(cancelCallback: () -> Boolean) {
@@ -70,7 +73,8 @@ class DiagnosticsManager(
             return
         }
 
-        LOG.info("Linting {}", describeURIs(pendingFiles))
+        val snapshot = synchronized(pendingFilesLock) { pendingFiles.toList() }
+        LOG.info("Linting {}", describeURIs(snapshot))
         beforeLintCallback()
         lintAction?.invoke(cancelCallback)
         lintCount++

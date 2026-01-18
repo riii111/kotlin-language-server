@@ -55,7 +55,7 @@ class KotlinTextDocumentService(
 
     // Test compatibility passthroughs
     val debounceLint get() = diagnosticsManager.debouncer
-    val lintTodo get() = diagnosticsManager.pendingFiles
+    val lintTodo get() = diagnosticsManager.pendingFilesSnapshot
     val lintCount get() = diagnosticsManager.lintCount
 
     var lintRecompilationCallback: () -> Unit
