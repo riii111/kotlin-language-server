@@ -108,9 +108,11 @@ class SourcePath(
                 compiledFile = parsed
             }
 
-            val oldDeclarations = getDeclarationDescriptors(listOfNotNull(oldFile))
-            val newDeclarations = getDeclarationDescriptors(listOfNotNull(this))
-            indexingService.refreshWorkspaceIndexes(oldDeclarations, newDeclarations, moduleId)
+            indexingService.refreshWorkspaceIndexes(
+                { getDeclarationDescriptors(listOfNotNull(oldFile)) },
+                { getDeclarationDescriptors(listOfNotNull(this)) },
+                moduleId
+            )
         }
 
         private fun doCompileIfChanged() {
@@ -179,8 +181,11 @@ class SourcePath(
 
     fun delete(uri: URI) {
         files[uri]?.let {
-            val oldDeclarations = getDeclarationDescriptors(listOf(it))
-            indexingService.refreshWorkspaceIndexes(oldDeclarations, emptySequence(), it.moduleId)
+            indexingService.refreshWorkspaceIndexes(
+                { getDeclarationDescriptors(listOf(it)) },
+                { emptySequence() },
+                it.moduleId
+            )
             codegenService.removeGeneratedCode(listOfNotNull(it.lastSavedFile), it.moduleId)
         }
 
@@ -239,9 +244,11 @@ class SourcePath(
             }
 
             if (kind == CompilationKind.DEFAULT) {
-                val oldDeclarations = getDeclarationDescriptors(oldFiles)
-                val newDeclarations = getDeclarationDescriptors(parse.keys.toList())
-                indexingService.refreshWorkspaceIndexes(oldDeclarations, newDeclarations, moduleId)
+                indexingService.refreshWorkspaceIndexes(
+                    { getDeclarationDescriptors(oldFiles) },
+                    { getDeclarationDescriptors(parse.keys.toList()) },
+                    moduleId
+                )
             }
 
             return context

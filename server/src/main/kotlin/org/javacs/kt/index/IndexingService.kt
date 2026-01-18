@@ -37,14 +37,15 @@ class IndexingService(
     /**
      * Refresh workspace indexes with old and new declarations.
      * Called after compilation to update the index with changed declarations.
+     * Uses lazy evaluation to avoid computing declarations when indexing is disabled.
      */
     fun refreshWorkspaceIndexes(
-        oldDeclarations: Sequence<DeclarationDescriptor>,
-        newDeclarations: Sequence<DeclarationDescriptor>,
+        oldDeclarationsProvider: () -> Sequence<DeclarationDescriptor>,
+        newDeclarationsProvider: () -> Sequence<DeclarationDescriptor>,
         moduleId: String?
     ) = indexAsync.execute {
         if (isEnabled) {
-            index.updateIndexes(oldDeclarations, newDeclarations, moduleId)
+            index.updateIndexes(oldDeclarationsProvider(), newDeclarationsProvider(), moduleId)
         }
     }
 

@@ -43,9 +43,17 @@ class LspExecutorPool : Closeable {
     override fun close() {
         async.shutdown(awaitTermination = true)
         executors.values.forEach { it.shutdown() }
-        executors.values.forEach {
+        executors.values.forEach { executor ->
             LOG.info("Awaiting executor termination...")
-            it.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS)
+            val terminated = executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            if (!terminated) {
+                LOG.warn("Executor did not terminate within {} seconds, forcing shutdown", SHUTDOWN_TIMEOUT_SECONDS)
+                executor.shutdownNow()
+            }
         }
+    }
+
+    companion object {
+        private const val SHUTDOWN_TIMEOUT_SECONDS = 30L
     }
 }
