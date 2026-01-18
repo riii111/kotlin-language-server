@@ -117,7 +117,7 @@ private fun indexCompletionItems(file: CompiledFile, cursor: Int, element: KtEle
     }
 
     return index
-        .query(partial, queryName, limit = MAX_COMPLETION_ITEMS)
+        .query(partial, queryName, limit = MAX_COMPLETION_ITEMS, moduleId = file.moduleId)
         .asSequence()
         .filter { it.kind != Symbol.Kind.MODULE } // Ignore global module/package name completions for now, since they cannot be 'imported'
         .filter { it.fqName.shortName() !in importedNames && it.fqName.parent() !in wildcardPackages }

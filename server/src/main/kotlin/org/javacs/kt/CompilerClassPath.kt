@@ -130,6 +130,7 @@ class CompilerClassPath(
             }
 
             updateModuleRegistry(resolver)
+            invalidateModuleCompilers()
 
             async.compute {
                 val newClassPathWithSources = resolver.classpathWithSources

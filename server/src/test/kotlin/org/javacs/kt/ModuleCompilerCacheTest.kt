@@ -101,4 +101,72 @@ class ModuleCompilerCacheTest {
 
         assertSame("Should return default compiler for unknown module", compilerClassPath.compiler, compiler)
     }
+
+    @Test
+    fun `eldest compiler is evicted when cache exceeds max size`() {
+        // MAX_MODULE_COMPILERS is 5, so create 6 modules
+        val moduleNames = (1..6).map { "module$it" }
+
+        for (name in moduleNames) {
+            val moduleSourceDir = tempDir.resolve("$name/src/main/kotlin")
+            Files.createDirectories(moduleSourceDir)
+            val moduleInfo = ModuleInfo(
+                name = name,
+                rootPath = tempDir.resolve(name),
+                sourceDirs = setOf(moduleSourceDir),
+                classPath = emptySet()
+            )
+            compilerClassPath.moduleRegistry.register(moduleInfo)
+        }
+
+        // Access compilers for all 6 modules in order
+        val compilers = moduleNames.map { compilerClassPath.getCompilerForModule(it) }
+
+        // All should be different from default compiler
+        compilers.forEach { compiler ->
+            assertNotSame("Should be module-specific compiler", compilerClassPath.compiler, compiler)
+        }
+
+        // The first compiler (module1) should have been evicted
+        // Getting it again should create a new instance
+        val reacquiredCompiler = compilerClassPath.getCompilerForModule("module1")
+
+        // The reacquired compiler should be a new instance (not the same as the original)
+        assertNotSame("Evicted compiler should be recreated as new instance", compilers[0], reacquiredCompiler)
+    }
+
+    @Test
+    fun `recently used compiler is not evicted`() {
+        // MAX_MODULE_COMPILERS is 5, so create 6 modules
+        val moduleNames = (1..6).map { "module$it" }
+
+        for (name in moduleNames) {
+            val moduleSourceDir = tempDir.resolve("$name/src/main/kotlin")
+            Files.createDirectories(moduleSourceDir)
+            val moduleInfo = ModuleInfo(
+                name = name,
+                rootPath = tempDir.resolve(name),
+                sourceDirs = setOf(moduleSourceDir),
+                classPath = emptySet()
+            )
+            compilerClassPath.moduleRegistry.register(moduleInfo)
+        }
+
+        // Access modules 1-5
+        val compiler1 = compilerClassPath.getCompilerForModule("module1")
+        compilerClassPath.getCompilerForModule("module2")
+        compilerClassPath.getCompilerForModule("module3")
+        compilerClassPath.getCompilerForModule("module4")
+        compilerClassPath.getCompilerForModule("module5")
+
+        // Access module1 again to make it recently used
+        compilerClassPath.getCompilerForModule("module1")
+
+        // Now access module6, which should evict module2 (the least recently used), not module1
+        compilerClassPath.getCompilerForModule("module6")
+
+        // module1 should still be the same instance
+        val reacquiredCompiler1 = compilerClassPath.getCompilerForModule("module1")
+        assertSame("Recently used compiler should not be evicted", compiler1, reacquiredCompiler1)
+    }
 }
