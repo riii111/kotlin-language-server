@@ -20,9 +20,9 @@ import org.javacs.kt.rename.renameSymbol
 import org.javacs.kt.highlight.documentHighlightsAt
 import org.javacs.kt.inlayhints.provideHints
 import org.javacs.kt.symbols.documentSymbols
+import org.javacs.kt.util.LspCacheManager
 import org.javacs.kt.util.LspExecutorPool
 import org.javacs.kt.util.LspOperation
-import org.javacs.kt.util.LspResponseCache
 import org.javacs.kt.util.TemporaryDirectory
 import org.javacs.kt.util.describeURI
 import org.javacs.kt.util.filePath
@@ -43,12 +43,8 @@ class KotlinTextDocumentService(
 ) : TextDocumentService, Closeable {
     private lateinit var client: LanguageClient
     private val executorPool = LspExecutorPool()
+    private val cacheManager = LspCacheManager()
     private val formattingService = FormattingService(config.formatting)
-
-    private val definitionCache = LspResponseCache<Location?>()
-    private val hoverCache = LspResponseCache<Hover?>()
-    private val completionCache = LspResponseCache<CompletionList>()
-    private val referencesCache = LspResponseCache<List<Location>?>()
 
     val diagnosticsManager = DiagnosticsManager(
         config.diagnostics.debounceTime,
@@ -134,7 +130,7 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                hoverCache.get(uri, line, character, fileVersion)?.let { cached ->
+                cacheManager.getHover(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Hover cache hit")
                     return@submit cached.value
                 }
@@ -142,7 +138,7 @@ class KotlinTextDocumentService(
                 val (file, cursor) = recover(position, Recompile.NEVER) ?: return@submit null
                 val result = hoverAt(file, cursor)
 
-                hoverCache.put(uri, line, character, fileVersion, result)
+                cacheManager.putHover(uri, line, character, fileVersion, result)
 
                 result ?: noResult("No hover found at ${describePosition(position)}", null)
             }
@@ -166,7 +162,7 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                definitionCache.get(uri, line, character, fileVersion)?.let { cached ->
+                cacheManager.getDefinition(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Definition cache hit")
                     return@submit cached.value?.let(::listOf)?.let { Either.forLeft(it) }
                         ?: Either.forLeft(emptyList())
@@ -176,7 +172,7 @@ class KotlinTextDocumentService(
                     ?: return@submit Either.forLeft(emptyList())
                 val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
 
-                definitionCache.put(uri, line, character, fileVersion, result)
+                cacheManager.putDefinition(uri, line, character, fileVersion, result)
 
                 result?.let(::listOf)
                     ?.let { Either.forLeft<List<Location>, List<LocationLink>>(it) }
@@ -210,7 +206,7 @@ class KotlinTextDocumentService(
                 val line = position.position.line
                 val character = position.position.character
 
-                completionCache.get(uri, line, character, fileVersion)?.let { cached ->
+                cacheManager.getCompletion(uri, line, character, fileVersion)?.let { cached ->
                     LOG.info("Completion cache hit with {} items", cached.value.items.size)
                     return@submit Either.forRight(cached.value)
                 }
@@ -219,7 +215,7 @@ class KotlinTextDocumentService(
                     ?: return@submit Either.forRight(CompletionList()) // TODO: Investigate when to recompile
                 val result = completions(file, cursor, sp.index, config.completion)
 
-                completionCache.put(uri, line, character, fileVersion, result)
+                cacheManager.putCompletion(uri, line, character, fileVersion, result)
 
                 LOG.info("Found {} items", result.items.size)
                 Either.forRight(result)
@@ -283,10 +279,8 @@ class KotlinTextDocumentService(
 
     override fun didChange(params: DidChangeTextDocumentParams) {
         val uri = parseURI(params.textDocument.uri)
-        definitionCache.invalidate(uri)
-        hoverCache.invalidate(uri)
-        completionCache.invalidate(uri)
-        referencesCache.clear() // Clear all because any file change can affect cross-file references
+        cacheManager.invalidateFile(uri)
+        cacheManager.clearAllReferences() // Clear all because any file change can affect cross-file references
         sf.edit(uri, params.textDocument.version, params.contentChanges)
         diagnosticsManager.scheduleLint(uri)
     }
@@ -298,7 +292,7 @@ class KotlinTextDocumentService(
             val line = position.position.line
             val character = position.position.character
 
-            referencesCache.get(uri, line, character, fileVersion)?.let { cached ->
+            cacheManager.getReferences(uri, line, character, fileVersion)?.let { cached ->
                 LOG.info("References cache hit with {} locations", cached.value?.size ?: 0)
                 return@submit cached.value
             }
@@ -310,7 +304,7 @@ class KotlinTextDocumentService(
                     findReferences(file, cursorOffset, sp)
                 }
 
-            referencesCache.put(uri, line, character, fileVersion, result)
+            cacheManager.putReferences(uri, line, character, fileVersion, result)
 
             result
         }
