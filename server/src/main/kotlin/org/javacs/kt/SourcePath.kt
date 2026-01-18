@@ -386,7 +386,11 @@ class SourcePath(
         for (sourceFile in snapshot) {
             if (sourceFile.isTemporary) continue
             val path = sourceFile.path ?: continue
-            sourceFile.moduleId = cp.moduleRegistry.findModuleForFile(path)?.name
+            val newModuleId = cp.moduleRegistry.findModuleForFile(path)?.name
+            if (newModuleId != sourceFile.moduleId) {
+                sourceFile.moduleId = newModuleId
+                sourceFile.clean()
+            }
         }
     }
 
