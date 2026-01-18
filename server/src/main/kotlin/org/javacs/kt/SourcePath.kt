@@ -314,9 +314,16 @@ class SourcePath(
 
     private fun refreshWorkspaceIndexes(oldFiles: List<SourceFile>, newFiles: List<SourceFile>) = indexAsync.execute {
         if (indexEnabled) {
-            val oldDeclarations = getDeclarationDescriptors(oldFiles)
-            val newDeclarations = getDeclarationDescriptors(newFiles)
-            index.updateIndexes(oldDeclarations, newDeclarations)
+            // Group files by moduleId to update indexes per module
+            val oldByModule = oldFiles.groupBy { it.moduleId }
+            val newByModule = newFiles.groupBy { it.moduleId }
+            val allModuleIds = (oldByModule.keys + newByModule.keys).distinct()
+
+            for (moduleId in allModuleIds) {
+                val oldDeclarations = getDeclarationDescriptors(oldByModule[moduleId] ?: emptyList())
+                val newDeclarations = getDeclarationDescriptors(newByModule[moduleId] ?: emptyList())
+                index.updateIndexes(oldDeclarations, newDeclarations, moduleId)
+            }
         }
     }
 

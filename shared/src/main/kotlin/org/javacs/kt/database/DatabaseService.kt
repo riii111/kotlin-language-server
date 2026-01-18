@@ -27,8 +27,10 @@ object Symbols : IntIdTable() {
     val extensionReceiverType = varchar("extensionreceivertype", length = MAX_FQNAME_LENGTH).nullable()
     val location = optReference("location", Locations)
     val sourceJar = varchar("sourcejar", length = MAX_URI_LENGTH).nullable().index()
+    val moduleId = varchar("moduleid", length = MAX_SHORT_NAME_LENGTH).nullable().index()
 
     val byShortName = index("symbol_shortname_index", false, shortName)
+    val byModuleAndShortName = index("symbol_module_shortname_index", false, moduleId, shortName)
 }
 
 object Locations : IntIdTable() {
@@ -65,7 +67,7 @@ class DatabaseService {
          * Database schema version. Increment this when changing table structures.
          * When version mismatches, the database will be deleted and recreated.
          */
-        const val DB_VERSION = 6
+        const val DB_VERSION = 7
         const val DB_FILENAME = "kls_database.db"
     }
 

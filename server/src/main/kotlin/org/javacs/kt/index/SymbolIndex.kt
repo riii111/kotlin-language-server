@@ -39,6 +39,7 @@ class SymbolEntity(id: EntityID<Int>) : IntEntity(id) {
     var visibility by Symbols.visibility
     var extensionReceiverType by Symbols.extensionReceiverType
     var location by LocationEntity optionalReferencedOn Symbols.location
+    var moduleId by Symbols.moduleId
 }
 
 class LocationEntity(id: EntityID<Int>) : IntEntity(id) {
@@ -301,19 +302,20 @@ class SymbolIndex(
         currentRefreshTask?.cancel(false)
     }
 
-    fun updateIndexes(remove: Sequence<DeclarationDescriptor>, add: Sequence<DeclarationDescriptor>) {
+    fun updateIndexes(remove: Sequence<DeclarationDescriptor>, add: Sequence<DeclarationDescriptor>, moduleId: String? = null) {
         val started = System.currentTimeMillis()
-        LOG.info("Updating symbol index...")
+        val moduleInfo = moduleId?.let { " for module '$it'" } ?: ""
+        LOG.info("Updating symbol index$moduleInfo...")
 
         try {
             indexLock.writeLock().withLock {
                 transaction(db) {
-                    removeDeclarations(remove)
-                    addDeclarations(add)
+                    removeDeclarations(remove, moduleId)
+                    addDeclarations(add, moduleId)
 
                     val finished = System.currentTimeMillis()
                     val symbolCount = countSymbols()
-                    LOG.info("Updated symbol index in ${finished - started} ms! ($symbolCount symbol(s))")
+                    LOG.info("Updated symbol index$moduleInfo in ${finished - started} ms! ($symbolCount symbol(s))")
 
                     if (isPersistent) {
                         // Use direct SQL update to avoid Entity cache issues
@@ -325,8 +327,25 @@ class SymbolIndex(
                 }
             }
         } catch (e: Exception) {
-            LOG.error("Error while updating symbol index")
+            LOG.error("Error while updating symbol index$moduleInfo")
             LOG.printStackTrace(e)
+        }
+    }
+
+    /**
+     * Removes all symbols belonging to a specific module.
+     * This is useful when a module is removed or needs to be re-indexed completely.
+     */
+    fun removeSymbolsFromModule(moduleId: String) {
+        val started = System.currentTimeMillis()
+        LOG.info("Removing symbols from module '$moduleId'...")
+
+        indexLock.writeLock().withLock {
+            transaction(db) {
+                val deletedCount = Symbols.deleteWhere { Symbols.moduleId eq moduleId }
+                val finished = System.currentTimeMillis()
+                LOG.info("Removed $deletedCount symbols from module '$moduleId' in ${finished - started} ms")
+            }
         }
     }
 
@@ -487,20 +506,22 @@ class SymbolIndex(
         }
     }
 
-    private fun removeDeclarations(declarations: Sequence<DeclarationDescriptor>) =
+    private fun removeDeclarations(declarations: Sequence<DeclarationDescriptor>, moduleId: String? = null) =
         declarations.forEach { declaration ->
             val (descriptorFqn, extensionReceiverFqn) = getFqNames(declaration)
 
             if (validFqName(descriptorFqn) && (extensionReceiverFqn?.let { validFqName(it) } != false)) {
                 Symbols.deleteWhere {
-                    (Symbols.fqName eq descriptorFqn.toString()) and (Symbols.extensionReceiverType eq extensionReceiverFqn?.toString())
+                    (Symbols.fqName eq descriptorFqn.toString()) and
+                    (Symbols.extensionReceiverType eq extensionReceiverFqn?.toString()) and
+                    (Symbols.moduleId eq moduleId)
                 }
             } else {
                 LOG.warn("Excluding symbol {} from index since its name is too long", descriptorFqn.toString())
             }
         }
 
-    private fun addDeclarations(declarations: Sequence<DeclarationDescriptor>) =
+    private fun addDeclarations(declarations: Sequence<DeclarationDescriptor>, moduleId: String? = null) =
         declarations.forEach { declaration ->
             val (descriptorFqn, extensionReceiverFqn) = getFqNames(declaration)
 
@@ -513,6 +534,7 @@ class SymbolIndex(
                     it[kind] = declaration.accept(ExtractSymbolKind, Unit).rawValue
                     it[visibility] = declaration.accept(ExtractSymbolVisibility, Unit).rawValue
                     it[extensionReceiverType] = extensionReceiverFqn?.toString()
+                    it[Symbols.moduleId] = moduleId
                 }
             } else {
                 LOG.warn("Excluding symbol {} from index since its name is too long", descriptorFqn.toString())
@@ -530,7 +552,16 @@ class SymbolIndex(
         fqName.toString().length <= MAX_FQNAME_LENGTH
             && fqName.shortName().toString().length <= MAX_SHORT_NAME_LENGTH
 
-    fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%"): List<Symbol> {
+    /**
+     * Query symbols from the index.
+     *
+     * @param prefix The prefix to search for in short names
+     * @param receiverType Optional extension receiver type filter
+     * @param limit Maximum number of results
+     * @param suffix Suffix for the LIKE query (default "%")
+     * @param moduleId Optional module ID filter. If null, searches all modules.
+     */
+    fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%", moduleId: String? = null): List<Symbol> {
         if (isIndexing) {
             LOG.debug("Index query while indexing is in progress, results may be incomplete")
         }
@@ -554,7 +585,12 @@ class SymbolIndex(
                 // TODO: Extension completion currently only works if the receiver matches exactly,
                 //       ideally this should work with subtypes as well
                 SymbolEntity.find {
-                    (Symbols.shortName like "$prefix$suffix") and (Symbols.extensionReceiverType eq receiverType?.toString())
+                    val baseCondition = (Symbols.shortName like "$prefix$suffix") and (Symbols.extensionReceiverType eq receiverType?.toString())
+                    if (moduleId != null) {
+                        baseCondition and (Symbols.moduleId eq moduleId)
+                    } else {
+                        baseCondition
+                    }
                 }.limit(limit)
                     .map { Symbol(
                         fqName = FqName(it.fqName),
