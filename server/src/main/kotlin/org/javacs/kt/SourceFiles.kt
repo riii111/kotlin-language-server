@@ -20,56 +20,65 @@ import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 private class SourceVersion(val content: String, val version: Int, val language: Language?, val isTemporary: Boolean)
 
 /**
- * Notify SourcePath whenever a file changes
+ * Notify SourcePath whenever a file changes.
+ * Thread-safe: uses read-write lock with I/O operations outside lock to prevent deadlock.
  */
 private class NotifySourcePath(private val sp: SourcePath) {
+    private val lock = ReentrantReadWriteLock()
     private val files = mutableMapOf<URI, SourceVersion>()
 
-    operator fun get(uri: URI): SourceVersion? = files[uri]
+    operator fun get(uri: URI): SourceVersion? = lock.read { files[uri] }
 
     operator fun set(uri: URI, source: SourceVersion) {
         val content = convertLineSeparators(source.content)
 
-        files[uri] = source
+        lock.write { files[uri] = source }
+        // Call sp.put() OUTSIDE lock to avoid deadlock with SourcePath
         sp.put(uri, content, source.language, source.isTemporary)
     }
 
     fun remove(uri: URI) {
-        files.remove(uri)
+        lock.write { files.remove(uri) }
+        // Call sp.delete() OUTSIDE lock to avoid deadlock with SourcePath
         sp.delete(uri)
     }
 
-    fun removeIfTemporary(uri: URI): Boolean =
-        if (sp.deleteIfTemporary(uri)) {
-            files.remove(uri)
-            true
-        } else {
-            false
+    fun removeIfTemporary(uri: URI): Boolean {
+        val deleted = sp.deleteIfTemporary(uri)
+        if (deleted) {
+            lock.write { files.remove(uri) }
         }
+        return deleted
+    }
 
     fun removeAll(rm: Collection<URI>) {
-        files -= rm
-
+        lock.write { files -= rm }
+        // Call sp.delete() OUTSIDE lock to avoid deadlock with SourcePath
         rm.forEach(sp::delete)
     }
 
-    val keys get() = files.keys
+    val keys: Set<URI> get() = lock.read { files.keys.toSet() }
 
-    fun getVersion(uri: URI): Int = files[uri]?.version ?: -1
+    fun getVersion(uri: URI): Int = lock.read { files[uri]?.version ?: -1 }
 }
 
 /**
- * Keep track of the text of all files in the workspace
+ * Keep track of the text of all files in the workspace.
+ * Thread-safe: uses read-write lock for open set with I/O operations outside lock.
  */
 class SourceFiles(
     private val sp: SourcePath,
     private val contentProvider: URIContentProvider,
     private val scriptsConfig: ScriptsConfiguration
 ) {
+    private val stateLock = ReentrantReadWriteLock()
     private val workspaceRoots = mutableSetOf<Path>()
     private var exclusions = SourceExclusions(workspaceRoots, scriptsConfig)
     private val files = NotifySourcePath(sp)
@@ -78,13 +87,21 @@ class SourceFiles(
     fun open(uri: URI, content: String, version: Int) {
         if (isIncluded(uri)) {
             files[uri] = SourceVersion(content, version, languageOf(uri), isTemporary = false)
-            open.add(uri)
+            stateLock.write { open.add(uri) }
         }
     }
 
     fun close(uri: URI) {
-        if (uri in open) {
-            open.remove(uri)
+        val wasOpen = stateLock.write {
+            if (uri in open) {
+                open.remove(uri)
+                true
+            } else {
+                false
+            }
+        }
+
+        if (wasOpen) {
             val removed = files.removeIfTemporary(uri)
 
             if (!removed) {
@@ -195,13 +212,13 @@ class SourceFiles(
         LOG.info("Updated exclusions: ${exclusions.excludedPatterns}")
     }
 
-    fun isOpen(uri: URI): Boolean = (uri in open)
+    fun isOpen(uri: URI): Boolean = stateLock.read { uri in open }
 
     fun isIncluded(uri: URI): Boolean = exclusions.isURIIncluded(uri)
 
     fun getVersion(uri: URI): Int = files.getVersion(uri)
 
-    fun openFiles(): Collection<URI> = open.toList()
+    fun openFiles(): Collection<URI> = stateLock.read { open.toList() }
 }
 
 private fun patch(sourceText: String, change: TextDocumentContentChangeEvent): String {
