@@ -119,7 +119,10 @@ class KotlinLanguageServer(
 
         classPath.onClassPathReady = {
             LOG.info("Classpath ready, refreshing module assignments and re-linting open files")
-            sourcePath.refreshModuleAssignments()
+            val reassignedCount = sourcePath.refreshModuleAssignments()
+            if (reassignedCount > 0) {
+                LOG.info("Reassigned moduleId for {} files", reassignedCount)
+            }
             textDocuments.lintAllOpenFiles()
         }
 

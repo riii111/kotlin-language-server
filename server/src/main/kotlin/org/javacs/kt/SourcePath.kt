@@ -381,8 +381,9 @@ class SourcePath(
         }
     }
 
-    fun refreshModuleAssignments() {
+    fun refreshModuleAssignments(): Int {
         val snapshot = filesLock.read { files.values.toList() }
+        var reassignedCount = 0
         for (sourceFile in snapshot) {
             if (sourceFile.isTemporary) continue
             val path = sourceFile.path ?: continue
@@ -390,8 +391,10 @@ class SourcePath(
             if (newModuleId != sourceFile.moduleId) {
                 sourceFile.moduleId = newModuleId
                 sourceFile.clean()
+                reassignedCount++
             }
         }
+        return reassignedCount
     }
 
     /**
