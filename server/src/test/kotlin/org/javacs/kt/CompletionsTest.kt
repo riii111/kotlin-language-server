@@ -362,3 +362,17 @@ class JavaGetterSetterConversionTest : SingleFileTestFixture("completions", "Jav
         assertThat(labels, hasItem(startsWith("isLenient")))
     }
 }
+
+class CompletionFreshnessTest : SingleFileTestFixture("completions", "CompletionFreshness.kt") {
+    @Test fun `complete newly added variable immediately after edit`() {
+        // File (1-indexed): line 1 = "private fun foo() {", line 2 = "    val existing = 1", line 3 = "    exi", line 4 = "}"
+        // Replace "exi" at line 3, col 5 with new variable and partial identifier
+        replace(file, 3, 5, "exi", "val freshVar = 2\n    fresh")
+        // Now: line 3 = "    val freshVar = 2", line 4 = "    fresh", line 5 = "}"
+        // Completion at line 4, col 10 (after "fresh")
+        val completions = languageServer.textDocumentService.completion(completionParams(file, 4, 10)).get().right!!
+        val labels = completions.items.map { it.label }
+
+        assertThat(labels, hasItem("freshVar"))
+    }
+}

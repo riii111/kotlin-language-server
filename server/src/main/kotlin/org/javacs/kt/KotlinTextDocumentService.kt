@@ -205,8 +205,8 @@ class KotlinTextDocumentService(
                     return@submit Either.forRight(cached.value)
                 }
 
-                val (file, cursor) = recover(position, Recompile.NEVER)
-                    ?: return@submit Either.forRight(CompletionList()) // TODO: Investigate when to recompile
+                val (file, cursor) = recover(position, Recompile.ALWAYS)
+                    ?: return@submit Either.forRight(CompletionList())
                 val result = completions(file, cursor, sp.index, config.completion)
 
                 cacheManager.putCompletion(uri, line, character, fileVersion, result)
