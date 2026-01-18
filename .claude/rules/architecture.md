@@ -86,6 +86,24 @@ Classpath resolution (Gradle/Maven CLI execution) runs in the background to prov
 - Completion (external): Limited
 - Diagnostics: Disabled (to prevent false positives)
 
+## Thread Safety
+
+LSP requests arrive concurrently from the editor. The following components protect shared mutable state:
+
+| Component | Lock Type | Protected State |
+|-----------|-----------|-----------------|
+| `DiagnosticsManager` | `synchronized` | `pendingFiles` |
+| `SourceFiles` | `ReentrantReadWriteLock` | `open`, `workspaceRoots`, `exclusions` |
+| `SourcePath` | `ReentrantReadWriteLock` | `files` |
+| `CompilerClassPath` | `ReentrantReadWriteLock` | `workspaceRoots`, `classPath`, `javaSourcePath`, `buildScriptClassPath` |
+| `ModuleRegistry` | `ReentrantReadWriteLock` | `modules` |
+
+**Design Rules:**
+
+1. **I/O outside locks**: To prevent deadlock between SourceFiles↔SourcePath, I/O operations (`contentProvider`, `sp.put()`, `sp.delete()`) must happen outside lock blocks
+2. **Snapshot for shared references**: Pass immutable snapshots (`.toSet()`) instead of mutable collection references (e.g., `SourceExclusions`)
+3. **@Volatile for lock-free reads**: Use `@Volatile` when reads don't need lock but must see latest writes (e.g., `exclusions`)
+
 ## Adding a New LSP Feature
 
 1. Create implementation in appropriate subdirectory under `server/src/main/kotlin/org/javacs/kt/`
