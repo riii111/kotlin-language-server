@@ -1,5 +1,6 @@
 package org.javacs.kt
 
+import org.javacs.kt.codegen.CodeGenerationService
 import org.javacs.kt.compiler.CompilationKind
 import org.javacs.kt.util.fileExtension
 import org.javacs.kt.util.filePath
@@ -30,6 +31,7 @@ class SourcePath(
     private val parseDataWriteLock = ReentrantLock()
 
     private val indexingService = IndexingService(SymbolIndex(databaseService), indexingConfig)
+    private val codegenService = CodeGenerationService { moduleId -> cp.getCompilerForModule(moduleId) }
     var indexEnabled: Boolean by indexingConfig::enabled
     val index: SymbolIndex get() = indexingService.getIndex()
 
@@ -179,7 +181,7 @@ class SourcePath(
         files[uri]?.let {
             val oldDeclarations = getDeclarationDescriptors(listOf(it))
             indexingService.refreshWorkspaceIndexes(oldDeclarations, emptySequence(), it.moduleId)
-            cp.compiler.removeGeneratedCode(listOfNotNull(it.lastSavedFile))
+            codegenService.removeGeneratedCode(listOfNotNull(it.lastSavedFile), it.moduleId)
         }
 
         files.remove(uri)
@@ -277,18 +279,12 @@ class SourcePath(
     fun save(uri: URI) {
         files[uri]?.let {
             if (!it.isScript) {
-                // If the code generation fails for some reason, we generate code for the other files anyway
-                try {
-                    val moduleCompiler = cp.getCompilerForModule(it.moduleId)
-                    moduleCompiler.removeGeneratedCode(listOfNotNull(it.lastSavedFile))
-                    it.module?.let { module ->
-                        it.compiledContext?.let { context ->
-                            moduleCompiler.generateCode(module, context, listOfNotNull(it.compiledFile))
-                            it.lastSavedFile = it.compiledFile
-                        }
+                codegenService.removeGeneratedCode(listOfNotNull(it.lastSavedFile), it.moduleId)
+                it.module?.let { module ->
+                    it.compiledContext?.let { context ->
+                        codegenService.generateCode(module, context, listOfNotNull(it.compiledFile), it.moduleId)
+                        it.lastSavedFile = it.compiledFile
                     }
-                } catch (ex: Exception) {
-                    LOG.printStackTrace(ex)
                 }
             }
         }
