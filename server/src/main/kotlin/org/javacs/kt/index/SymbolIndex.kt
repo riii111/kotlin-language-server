@@ -559,7 +559,8 @@ class SymbolIndex(
      * @param receiverType Optional extension receiver type filter
      * @param limit Maximum number of results
      * @param suffix Suffix for the LIKE query (default "%")
-     * @param moduleId Optional module ID filter. If null, searches all modules.
+     * @param moduleId Optional module ID filter. If specified, returns symbols from that module
+     *                 plus dependency symbols (moduleId = null). If null, searches all modules.
      */
     fun query(prefix: String, receiverType: FqName? = null, limit: Int = 20, suffix: String = "%", moduleId: String? = null): List<Symbol> {
         if (isIndexing) {
@@ -587,7 +588,7 @@ class SymbolIndex(
                 SymbolEntity.find {
                     val baseCondition = (Symbols.shortName like "$prefix$suffix") and (Symbols.extensionReceiverType eq receiverType?.toString())
                     if (moduleId != null) {
-                        baseCondition and (Symbols.moduleId eq moduleId)
+                        baseCondition and ((Symbols.moduleId eq moduleId) or (Symbols.moduleId.isNull()))
                     } else {
                         baseCondition
                     }

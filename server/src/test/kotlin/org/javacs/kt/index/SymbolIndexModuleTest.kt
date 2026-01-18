@@ -164,4 +164,41 @@ class SymbolIndexModuleTest {
             assertEquals("Should have 2 helper symbols in different modules", 2L, helperCount)
         }
     }
+
+    @Test
+    fun `query with moduleId includes dependency symbols`() {
+        val db = databaseService.db!!
+
+        transaction(db) {
+            Symbols.insert {
+                it[fqName] = "com.example.a.MyClass"
+                it[shortName] = "MyClass"
+                it[kind] = 1
+                it[visibility] = 1
+                it[moduleId] = "moduleA"
+            }
+            Symbols.insert {
+                it[fqName] = "com.example.b.MyClass"
+                it[shortName] = "MyClass"
+                it[kind] = 1
+                it[visibility] = 1
+                it[moduleId] = "moduleB"
+            }
+            Symbols.insert {
+                it[fqName] = "org.external.MyClass"
+                it[shortName] = "MyClass"
+                it[kind] = 1
+                it[visibility] = 1
+                it[moduleId] = null
+            }
+        }
+
+        val moduleAResults = index.query("MyClass", moduleId = "moduleA")
+
+        assertEquals("Should return moduleA + dependency symbols", 2, moduleAResults.size)
+        val fqNames = moduleAResults.map { it.fqName.toString() }.toSet()
+        assertTrue("Should include moduleA symbol", fqNames.contains("com.example.a.MyClass"))
+        assertTrue("Should include dependency symbol", fqNames.contains("org.external.MyClass"))
+        assertFalse("Should NOT include moduleB symbol", fqNames.contains("com.example.b.MyClass"))
+    }
 }
