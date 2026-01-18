@@ -7,7 +7,9 @@ import org.junit.Before
 import org.junit.Test
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class BackgroundClassPathTest {
     private lateinit var classPath: CompilerClassPath
@@ -128,5 +130,72 @@ class BackgroundClassPathTest {
 
         assertTrue("At least one resolution should complete", completedResolutions.get() >= 1)
         assertEquals(ClassPathResolutionState.READY, classPath.resolutionState)
+    }
+
+    @Test
+    fun `concurrent workspace operations do not cause race conditions`() {
+        val executor = Executors.newFixedThreadPool(4)
+        val hasError = AtomicBoolean(false)
+        val operationCount = 20
+        val latch = CountDownLatch(operationCount)
+
+        try {
+            repeat(operationCount) { i ->
+                executor.submit {
+                    try {
+                        val subDir = Files.createTempDirectory(tempDir, "workspace$i")
+                        classPath.addWorkspaceRoot(subDir)
+                        // Access workspaceRoots while modifications may be happening
+                        classPath.workspaceRoots
+                        classPath.classPath
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        hasError.set(true)
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+            }
+
+            assertTrue("All operations should complete within timeout", latch.await(30, TimeUnit.SECONDS))
+            assertFalse("No errors should occur during concurrent operations", hasError.get())
+        } finally {
+            executor.shutdown()
+            executor.awaitTermination(5, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `concurrent file disk operations are thread safe`() {
+        val executor = Executors.newFixedThreadPool(4)
+        val hasError = AtomicBoolean(false)
+        val operationCount = 30
+        val latch = CountDownLatch(operationCount)
+
+        classPath.addWorkspaceRoot(tempDir)
+
+        try {
+            repeat(operationCount) { i ->
+                executor.submit {
+                    try {
+                        val javaFile = tempDir.resolve("Test$i.java")
+                        Files.write(javaFile, listOf("public class Test$i {}"))
+                        classPath.createdOnDisk(javaFile)
+                        classPath.deletedOnDisk(javaFile)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        hasError.set(true)
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+            }
+
+            assertTrue("All operations should complete within timeout", latch.await(30, TimeUnit.SECONDS))
+            assertFalse("No errors should occur during concurrent file operations", hasError.get())
+        } finally {
+            executor.shutdown()
+            executor.awaitTermination(5, TimeUnit.SECONDS)
+        }
     }
 }

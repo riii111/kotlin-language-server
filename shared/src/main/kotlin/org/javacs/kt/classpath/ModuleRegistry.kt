@@ -2,31 +2,35 @@ package org.javacs.kt.classpath
 
 import org.javacs.kt.LOG
 import java.nio.file.Path
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 class ModuleRegistry {
+    private val lock = ReentrantReadWriteLock()
     private val modules = mutableMapOf<String, ModuleInfo>()
 
-    fun register(module: ModuleInfo) {
+    fun register(module: ModuleInfo) = lock.write {
         modules[module.name] = module
         LOG.debug("Registered module '{}' with {} source directories", module.name, module.sourceDirs.size)
     }
 
-    fun findModuleForFile(filePath: Path): ModuleInfo? {
+    fun findModuleForFile(filePath: Path): ModuleInfo? = lock.read {
         val normalizedPath = filePath.toAbsolutePath().normalize()
-        return modules.values.find { it.containsFile(normalizedPath) }
+        modules.values.find { it.containsFile(normalizedPath) }
     }
 
-    fun getModule(name: String): ModuleInfo? = modules[name]
+    fun getModule(name: String): ModuleInfo? = lock.read { modules[name] }
 
-    fun allModules(): Collection<ModuleInfo> = modules.values.toList()
+    fun allModules(): Collection<ModuleInfo> = lock.read { modules.values.toList() }
 
-    fun moduleNames(): Set<String> = modules.keys.toSet()
+    fun moduleNames(): Set<String> = lock.read { modules.keys.toSet() }
 
-    fun size(): Int = modules.size
+    fun size(): Int = lock.read { modules.size }
 
-    fun isEmpty(): Boolean = modules.isEmpty()
+    fun isEmpty(): Boolean = lock.read { modules.isEmpty() }
 
-    fun clear() {
+    fun clear() = lock.write {
         modules.clear()
         LOG.debug("Cleared all modules from registry")
     }

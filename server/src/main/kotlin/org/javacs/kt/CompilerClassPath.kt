@@ -14,6 +14,9 @@ import java.io.Closeable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import java.io.File
 import java.nio.file.FileSystems
 import java.nio.file.Files
@@ -43,11 +46,17 @@ class CompilerClassPath(
         private const val MAX_MODULE_COMPILERS = 5
     }
 
-    val workspaceRoots = mutableSetOf<Path>()
+    private val pathsLock = ReentrantReadWriteLock()
+    private val _workspaceRoots = mutableSetOf<Path>()
+    private val _javaSourcePath = mutableSetOf<Path>()
+    private val _buildScriptClassPath = mutableSetOf<Path>()
+    private val _classPath = mutableSetOf<ClassPathEntry>()
 
-    private val javaSourcePath = mutableSetOf<Path>()
-    private val buildScriptClassPath = mutableSetOf<Path>()
-    val classPath = mutableSetOf<ClassPathEntry>()
+    val workspaceRoots: Set<Path>
+        get() = pathsLock.read { _workspaceRoots.toSet() }
+
+    val classPath: Set<ClassPathEntry>
+        get() = pathsLock.read { _classPath.toSet() }
     val outputDirectory: File = Files.createTempDirectory("klsBuildOutput").toFile()
     val javaHome: String? = System.getProperty("java.home", null)
 
@@ -72,15 +81,16 @@ class CompilerClassPath(
         get() = getOrCreateResolver().currentBuildFileVersion
 
     private fun getOrCreateResolver(): ClassPathResolver {
-        return cachedResolver ?: defaultClassPathResolver(workspaceRoots, databaseService.db).also {
+        val roots = pathsLock.read { _workspaceRoots.toSet() }
+        return cachedResolver ?: defaultClassPathResolver(roots, databaseService.db).also {
             cachedResolver = it
         }
     }
 
     var compiler = Compiler(
-        javaSourcePath,
-        classPath.map { it.compiledJar }.toSet(),
-        buildScriptClassPath,
+        _javaSourcePath,
+        _classPath.map { it.compiledJar }.toSet(),
+        _buildScriptClassPath,
         scriptsConfig,
         codegenConfig,
         outputDirectory
@@ -121,8 +131,9 @@ class CompilerClassPath(
 
         if (updateClassPath) {
             val newClassPath = resolver.classpathOrEmpty
-            if (newClassPath != classPath) {
-                synchronized(classPath) {
+            val currentClassPath = pathsLock.read { _classPath.toSet() }
+            if (newClassPath != currentClassPath) {
+                pathsLock.write {
                     val (added, removed) = syncClassPath(newClassPath)
                     lastClassPathDiff = ClassPathDiff(added, removed)
                 }
@@ -134,7 +145,7 @@ class CompilerClassPath(
 
             async.compute {
                 val newClassPathWithSources = resolver.classpathWithSources
-                synchronized(classPath) {
+                pathsLock.write {
                     syncClassPath(newClassPathWithSources)
                 }
             }
@@ -143,8 +154,11 @@ class CompilerClassPath(
         if (updateBuildScriptClassPath) {
             LOG.info("Update build script path")
             val newBuildScriptClassPath = resolver.buildScriptClasspathOrEmpty
-            if (newBuildScriptClassPath != buildScriptClassPath) {
-                syncPaths(buildScriptClassPath, newBuildScriptClassPath, "build script class path") { it }
+            val currentBuildScriptClassPath = pathsLock.read { _buildScriptClassPath.toSet() }
+            if (newBuildScriptClassPath != currentBuildScriptClassPath) {
+                pathsLock.write {
+                    syncPaths(_buildScriptClassPath, newBuildScriptClassPath, "build script class path") { it }
+                }
                 refreshCompiler = true
             }
         }
@@ -153,10 +167,17 @@ class CompilerClassPath(
             LOG.info("Reinstantiating compiler")
             compiler.close()
             invalidateModuleCompilers()
+            val (javaSourceSnapshot, classPathSnapshot, buildScriptSnapshot) = pathsLock.read {
+                Triple(
+                    _javaSourcePath.toSet(),
+                    _classPath.map { it.compiledJar }.toSet(),
+                    _buildScriptClassPath.toSet()
+                )
+            }
             compiler = Compiler(
-                javaSourcePath,
-                classPath.map { it.compiledJar }.toSet(),
-                buildScriptClassPath,
+                javaSourceSnapshot,
+                classPathSnapshot,
+                buildScriptSnapshot,
                 scriptsConfig,
                 codegenConfig,
                 outputDirectory
@@ -167,15 +188,16 @@ class CompilerClassPath(
         return refreshCompiler
     }
 
+    // Must be called while holding pathsLock.write
     private fun syncClassPath(newClassPath: Set<ClassPathEntry>): Pair<Set<ClassPathEntry>, Set<ClassPathEntry>> {
-        val added = newClassPath - classPath
-        val removed = classPath - newClassPath
+        val added = newClassPath - _classPath
+        val removed = _classPath - newClassPath
 
         logAdded(added.map { it.compiledJar }, "class path")
         logRemoved(removed.map { it.compiledJar }, "class path")
 
-        classPath.removeAll(removed)
-        classPath.addAll(added)
+        _classPath.removeAll(removed)
+        _classPath.addAll(added)
 
         return Pair(added, removed)
     }
@@ -246,11 +268,14 @@ class CompilerClassPath(
         val moduleInfo = moduleRegistry.getModule(moduleId) ?: return compiler
 
         return moduleCompilerCache.getOrPut(moduleId) {
+            val (javaSourceSnapshot, buildScriptSnapshot) = pathsLock.read {
+                Pair(_javaSourcePath.toSet(), _buildScriptClassPath.toSet())
+            }
             LOG.info("Creating compiler for module '$moduleId' with ${moduleInfo.classPath.size} classpath entries")
             Compiler(
-                javaSourcePath,
+                javaSourceSnapshot,
                 moduleInfo.classPath,
-                buildScriptClassPath,
+                buildScriptSnapshot,
                 scriptsConfig,
                 codegenConfig,
                 outputDirectory
@@ -270,9 +295,13 @@ class CompilerClassPath(
     fun addWorkspaceRoot(root: Path): Boolean {
         LOG.info("Searching for dependencies and Java sources in workspace root {}", root)
 
-        workspaceRoots.add(root)
-        javaSourcePath.addAll(findJavaSourceFiles(root))
+        val javaFiles = findJavaSourceFiles(root)
+        pathsLock.write {
+            _workspaceRoots.add(root)
+            _javaSourcePath.addAll(javaFiles)
+        }
 
+        // startBackgroundResolution OUTSIDE lock
         startBackgroundResolution()
         return false
     }
@@ -306,22 +335,25 @@ class CompilerClassPath(
     fun removeWorkspaceRoot(root: Path): Boolean {
         LOG.info("Removing dependencies and Java source path from workspace root {}", root)
 
-        workspaceRoots.remove(root)
-        javaSourcePath.removeAll(findJavaSourceFiles(root))
+        val javaFiles = findJavaSourceFiles(root)
+        pathsLock.write {
+            _workspaceRoots.remove(root)
+            _javaSourcePath.removeAll(javaFiles)
+        }
 
         return refresh()
     }
 
     fun createdOnDisk(file: Path): Boolean {
         if (isJavaSource(file)) {
-            javaSourcePath.add(file)
+            pathsLock.write { _javaSourcePath.add(file) }
         }
         return changedOnDisk(file)
     }
 
     fun deletedOnDisk(file: Path): Boolean {
         if (isJavaSource(file)) {
-            javaSourcePath.remove(file)
+            pathsLock.write { _javaSourcePath.remove(file) }
         }
         return changedOnDisk(file)
     }
