@@ -59,31 +59,19 @@ class CompiledFile(
         else return surroundingExpr
     }
 
-    /**
-     * Looks for a reference expression at the given cursor.
-     * This is currently used by many features in the language server.
-     * Unfortunately, it fails to find declarations for JDK symbols.
-     * [referenceExpressionAtPoint] provides an alternative implementation that can find JDK symbols.
-     * It cannot, however, replace this method at the moment.
-     * TODO: Investigate why this method doesn't find JDK symbols.
-     */
     fun referenceAtPoint(cursor: Int): Pair<KtExpression, DeclarationDescriptor>? {
         val element = parseAtPoint(cursor, asReference = true)
         val cursorExpr = element?.findParent<KtExpression>() ?: return nullResult("Couldn't find expression at ${describePosition(cursor)} (only found $element)")
         val surroundingExpr = expandForReference(cursor, cursorExpr)
         val scope = scopeAtPoint(cursor) ?: return nullResult("Couldn't find scope at ${describePosition(cursor)}")
-        // NOTE: Due to our tiny-fake-file mechanism, we may have `path == /dummy.virtual.kt != parse.containingFile.toPath`
+        // tiny-fake-file mechanism may cause path mismatch
         val path = surroundingExpr.containingFile.toPath()
         val context = bindingContextOf(surroundingExpr, scope) ?: return null
         LOG.info("Hovering {}", surroundingExpr)
         return referenceFromContext(cursor, path, context)
+            ?: referenceExpressionAtPoint(cursor)
     }
 
-    /**
-     * Looks for a reference expression at the given cursor.
-     * This method is similar to [referenceAtPoint], but the latter fails to find declarations for JDK symbols.
-     * This method should not be used for anything other than finding definitions (at least for now).
-     */
     fun referenceExpressionAtPoint(cursor: Int): Pair<KtExpression, DeclarationDescriptor>? {
         val path = parse.containingFile.toPath()
         return referenceFromContext(cursor, path, compile)
