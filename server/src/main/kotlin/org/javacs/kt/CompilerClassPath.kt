@@ -39,6 +39,10 @@ class CompilerClassPath(
     private val codegenConfig: CodegenConfiguration,
     private val databaseService: DatabaseService
 ) : Closeable {
+    companion object {
+        private const val MAX_MODULE_COMPILERS = 5
+    }
+
     val workspaceRoots = mutableSetOf<Path>()
 
     private val javaSourcePath = mutableSetOf<Path>()
@@ -48,6 +52,17 @@ class CompilerClassPath(
     val javaHome: String? = System.getProperty("java.home", null)
 
     val moduleRegistry = ModuleRegistry()
+
+    private val moduleCompilerCache = object : LinkedHashMap<String, Compiler>(MAX_MODULE_COMPILERS, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Compiler>?): Boolean {
+            if (size > MAX_MODULE_COMPILERS) {
+                eldest?.value?.close()
+                LOG.info("Evicted compiler for module '${eldest?.key}' from cache (size exceeded $MAX_MODULE_COMPILERS)")
+                return true
+            }
+            return false
+        }
+    }
 
     @Volatile
     private var cachedResolver: ClassPathResolver? = null
@@ -115,6 +130,7 @@ class CompilerClassPath(
             }
 
             updateModuleRegistry(resolver)
+            invalidateModuleCompilers()
 
             async.compute {
                 val newClassPathWithSources = resolver.classpathWithSources
@@ -136,6 +152,7 @@ class CompilerClassPath(
         if (refreshCompiler) {
             LOG.info("Reinstantiating compiler")
             compiler.close()
+            invalidateModuleCompilers()
             compiler = Compiler(
                 javaSourcePath,
                 classPath.map { it.compiledJar }.toSet(),
@@ -214,6 +231,40 @@ class CompilerClassPath(
 
     fun updateCompilerConfiguration() {
         compiler.updateConfiguration(config)
+    }
+
+    /**
+     * Get a compiler for a specific module. Uses module-specific classpath for isolation.
+     * Falls back to the default compiler if module not found or moduleId is null.
+     */
+    @Synchronized
+    fun getCompilerForModule(moduleId: String?): Compiler {
+        if (moduleId == null || moduleRegistry.isEmpty()) {
+            return compiler
+        }
+
+        val moduleInfo = moduleRegistry.getModule(moduleId) ?: return compiler
+
+        return moduleCompilerCache.getOrPut(moduleId) {
+            LOG.info("Creating compiler for module '$moduleId' with ${moduleInfo.classPath.size} classpath entries")
+            Compiler(
+                javaSourcePath,
+                moduleInfo.classPath,
+                buildScriptClassPath,
+                scriptsConfig,
+                codegenConfig,
+                outputDirectory
+            ).also { it.updateConfiguration(config) }
+        }
+    }
+
+    @Synchronized
+    private fun invalidateModuleCompilers() {
+        if (moduleCompilerCache.isNotEmpty()) {
+            LOG.info("Invalidating ${moduleCompilerCache.size} module-specific compilers")
+            moduleCompilerCache.values.forEach { it.close() }
+            moduleCompilerCache.clear()
+        }
     }
 
     fun addWorkspaceRoot(root: Path): Boolean {
@@ -308,6 +359,7 @@ class CompilerClassPath(
     override fun close() {
         resolutionFuture.get()?.cancel(true)
         async.shutdown(awaitTermination = true)
+        invalidateModuleCompilers()
         compiler.close()
         outputDirectory.delete()
     }

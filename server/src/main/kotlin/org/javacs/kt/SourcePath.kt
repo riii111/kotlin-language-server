@@ -120,7 +120,7 @@ class SourcePath(
                 parseIfChanged().apply { compileIfNull() }.let { doPrepareCompiledFile() }
 
         private fun doPrepareCompiledFile(): CompiledFile =
-                CompiledFile(content, compiledFile!!, compiledContext!!, module!!, allIncludingThis(), cp, isScript, kind)
+                CompiledFile(content, compiledFile!!, compiledContext!!, module!!, allIncludingThis(), cp, isScript, kind, moduleId)
 
         private fun allIncludingThis(): Collection<KtFile> = parseIfChanged().let {
             val moduleFiles = if (cp.moduleRegistry.isEmpty()) {
@@ -217,7 +217,12 @@ class SourcePath(
                 allInModule(moduleId)
             }
             beforeCompileCallback.invoke()
-            val (context, module) = cp.compiler.compileKtFiles(parse.values, allFiles, kind)
+            val moduleCompiler = if (kind == CompilationKind.BUILD_SCRIPT) {
+                cp.compiler
+            } else {
+                cp.getCompilerForModule(moduleId)
+            }
+            val (context, module) = moduleCompiler.compileKtFiles(parse.values, allFiles, kind)
 
             for ((f, parsed) in parse) {
                 parseDataWriteLock.withLock {
@@ -270,10 +275,11 @@ class SourcePath(
             if (!it.isScript) {
                 // If the code generation fails for some reason, we generate code for the other files anyway
                 try {
-                    cp.compiler.removeGeneratedCode(listOfNotNull(it.lastSavedFile))
+                    val moduleCompiler = cp.getCompilerForModule(it.moduleId)
+                    moduleCompiler.removeGeneratedCode(listOfNotNull(it.lastSavedFile))
                     it.module?.let { module ->
                         it.compiledContext?.let { context ->
-                            cp.compiler.generateCode(module, context, listOfNotNull(it.compiledFile))
+                            moduleCompiler.generateCode(module, context, listOfNotNull(it.compiledFile))
                             it.lastSavedFile = it.compiledFile
                         }
                     }
@@ -314,9 +320,16 @@ class SourcePath(
 
     private fun refreshWorkspaceIndexes(oldFiles: List<SourceFile>, newFiles: List<SourceFile>) = indexAsync.execute {
         if (indexEnabled) {
-            val oldDeclarations = getDeclarationDescriptors(oldFiles)
-            val newDeclarations = getDeclarationDescriptors(newFiles)
-            index.updateIndexes(oldDeclarations, newDeclarations)
+            // Group files by moduleId to update indexes per module
+            val oldByModule = oldFiles.groupBy { it.moduleId }
+            val newByModule = newFiles.groupBy { it.moduleId }
+            val allModuleIds = (oldByModule.keys + newByModule.keys).distinct()
+
+            for (moduleId in allModuleIds) {
+                val oldDeclarations = getDeclarationDescriptors(oldByModule[moduleId] ?: emptyList())
+                val newDeclarations = getDeclarationDescriptors(newByModule[moduleId] ?: emptyList())
+                index.updateIndexes(oldDeclarations, newDeclarations, moduleId)
+            }
         }
     }
 

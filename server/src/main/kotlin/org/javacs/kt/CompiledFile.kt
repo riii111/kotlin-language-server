@@ -32,7 +32,8 @@ class CompiledFile(
     val sourcePath: Collection<KtFile>,
     val classPath: CompilerClassPath,
     val isScript: Boolean = false,
-    val kind: CompilationKind = CompilationKind.DEFAULT
+    val kind: CompilationKind = CompilationKind.DEFAULT,
+    val moduleId: String? = null
 ) {
     /**
      * Find the type of the expression at `cursor`
@@ -48,7 +49,7 @@ class CompiledFile(
             bindingContextOf(expression, scopeWithImports)?.getType(expression)
 
     fun bindingContextOf(expression: KtExpression, scopeWithImports: LexicalScope): BindingContext? =
-            classPath.compiler.compileKtExpression(expression, scopeWithImports, sourcePath, kind)?.first
+            classPath.getCompilerForModule(moduleId).compileKtExpression(expression, scopeWithImports, sourcePath, kind)?.first
 
     private fun expandForType(cursor: Int, surroundingExpr: KtExpression): KtExpression {
         val dotParent = surroundingExpr.parent as? KtDotQualifiedExpression
@@ -124,7 +125,7 @@ class CompiledFile(
 
         val (surroundingContent, offset) = contentAndOffsetFromElement(psi, oldParent, asReference)
         val padOffset = " ".repeat(offset)
-        val recompile = classPath.compiler.createKtFile(padOffset + surroundingContent, Paths.get("dummy.virtual" + if (isScript) ".kts" else ".kt"), kind)
+        val recompile = classPath.getCompilerForModule(moduleId).createKtFile(padOffset + surroundingContent, Paths.get("dummy.virtual" + if (isScript) ".kts" else ".kt"), kind)
         return recompile.findElementAt(cursor)?.findParent<KtElement>()
     }
 
