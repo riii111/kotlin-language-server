@@ -87,3 +87,21 @@ class HoverAcrossFilesTest : LanguageServerTestFixture("hover") {
         assertThat(contents.value, containsString("fun target(): Unit"))
     }
 }
+
+class HoverJdkSymbolTest : SingleFileTestFixture("hover", "JdkSymbol.kt") {
+    @Test fun `hover on String length property`() {
+        // line 3: "    val len = text.length", hover on "length" at column 20
+        val hover = languageServer.textDocumentService.hover(hoverParams(file, 3, 20)).get()!!
+        val contents = hover.contents.right
+
+        assertThat(contents.value, containsString("length"))
+    }
+
+    @Test fun `hover on List size property`() {
+        // line 5: "    val size = list.size", hover on "size" at column 22
+        val hover = languageServer.textDocumentService.hover(hoverParams(file, 5, 22)).get()!!
+        val contents = hover.contents.right
+
+        assertThat(contents.value, containsString("size"))
+    }
+}
