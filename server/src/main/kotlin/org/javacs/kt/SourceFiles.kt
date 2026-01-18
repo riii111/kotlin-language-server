@@ -80,7 +80,7 @@ class SourceFiles(
 ) {
     private val stateLock = ReentrantReadWriteLock()
     private val workspaceRoots = mutableSetOf<Path>()
-    private var exclusions = SourceExclusions(workspaceRoots, scriptsConfig)
+    @Volatile private var exclusions = SourceExclusions(emptySet(), scriptsConfig)
     private val files = NotifySourcePath(sp)
     private val open = mutableSetOf<URI>()
 
@@ -184,8 +184,11 @@ class SourceFiles(
             } ?: LOG.warn("Could not read source file '{}'", uri.path)
         }
 
-        workspaceRoots.add(root)
-        updateExclusions()
+        stateLock.write {
+            workspaceRoots.add(root)
+            exclusions = SourceExclusions(workspaceRoots.toSet(), scriptsConfig)
+        }
+        LOG.info("Updated exclusions: ${exclusions.excludedPatterns}")
     }
 
     fun removeWorkspaceRoot(root: Path) {
@@ -194,8 +197,11 @@ class SourceFiles(
         logRemoved(rmSources, root)
 
         files.removeAll(rmSources)
-        workspaceRoots.remove(root)
-        updateExclusions()
+        stateLock.write {
+            workspaceRoots.remove(root)
+            exclusions = SourceExclusions(workspaceRoots.toSet(), scriptsConfig)
+        }
+        LOG.info("Updated exclusions: ${exclusions.excludedPatterns}")
     }
 
     private fun findSourceFiles(root: Path): Set<URI> {
@@ -208,7 +214,9 @@ class SourceFiles(
     }
 
     fun updateExclusions() {
-        exclusions = SourceExclusions(workspaceRoots, scriptsConfig)
+        stateLock.write {
+            exclusions = SourceExclusions(workspaceRoots.toSet(), scriptsConfig)
+        }
         LOG.info("Updated exclusions: ${exclusions.excludedPatterns}")
     }
 
