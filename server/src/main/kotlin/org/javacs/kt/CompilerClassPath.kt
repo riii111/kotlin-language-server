@@ -247,7 +247,7 @@ class CompilerClassPath(
         return moduleCompilerCache.getOrPut(moduleId) {
             LOG.info("Creating compiler for module '$moduleId' with ${moduleInfo.classPath.size} classpath entries")
             Compiler(
-                emptySet(),
+                javaSourcePath,
                 moduleInfo.classPath,
                 buildScriptClassPath,
                 scriptsConfig,

@@ -120,7 +120,7 @@ class SourcePath(
                 parseIfChanged().apply { compileIfNull() }.let { doPrepareCompiledFile() }
 
         private fun doPrepareCompiledFile(): CompiledFile =
-                CompiledFile(content, compiledFile!!, compiledContext!!, module!!, allIncludingThis(), cp, isScript, kind)
+                CompiledFile(content, compiledFile!!, compiledContext!!, module!!, allIncludingThis(), cp, isScript, kind, moduleId)
 
         private fun allIncludingThis(): Collection<KtFile> = parseIfChanged().let {
             val moduleFiles = if (cp.moduleRegistry.isEmpty()) {
@@ -275,10 +275,11 @@ class SourcePath(
             if (!it.isScript) {
                 // If the code generation fails for some reason, we generate code for the other files anyway
                 try {
-                    cp.compiler.removeGeneratedCode(listOfNotNull(it.lastSavedFile))
+                    val moduleCompiler = cp.getCompilerForModule(it.moduleId)
+                    moduleCompiler.removeGeneratedCode(listOfNotNull(it.lastSavedFile))
                     it.module?.let { module ->
                         it.compiledContext?.let { context ->
-                            cp.compiler.generateCode(module, context, listOfNotNull(it.compiledFile))
+                            moduleCompiler.generateCode(module, context, listOfNotNull(it.compiledFile))
                             it.lastSavedFile = it.compiledFile
                         }
                     }

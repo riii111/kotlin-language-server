@@ -32,7 +32,8 @@ class CompiledFile(
     val sourcePath: Collection<KtFile>,
     val classPath: CompilerClassPath,
     val isScript: Boolean = false,
-    val kind: CompilationKind = CompilationKind.DEFAULT
+    val kind: CompilationKind = CompilationKind.DEFAULT,
+    val moduleId: String? = null
 ) {
     /**
      * Find the type of the expression at `cursor`
