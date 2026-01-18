@@ -51,16 +51,17 @@ class IndexingService(
 
     /**
      * Refresh dependency indexes from external dependencies.
+     * Uses lazy evaluation to avoid computing declarations when indexing is disabled.
      */
     fun refreshDependencyIndexes(
         module: ModuleDescriptor,
-        workspaceDeclarations: Sequence<DeclarationDescriptor>,
+        workspaceDeclarationsProvider: () -> Sequence<DeclarationDescriptor>,
         buildFileVersion: Long,
         skipIfValid: Boolean,
         batchSize: Int
     ) = indexAsync.execute {
         if (isEnabled) {
-            index.refresh(module, workspaceDeclarations, buildFileVersion, skipIfValid, batchSize)
+            index.refresh(module, workspaceDeclarationsProvider(), buildFileVersion, skipIfValid, batchSize)
         }
     }
 

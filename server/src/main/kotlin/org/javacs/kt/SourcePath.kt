@@ -320,10 +320,9 @@ class SourcePath(
             if (diff != null && diff.hasChanges) {
                 indexingService.refreshDependencyIndexesIncrementally(diff, module)
             } else {
-                val declarations = getDeclarationDescriptors(files.values)
                 indexingService.refreshDependencyIndexes(
                     module,
-                    declarations,
+                    { getDeclarationDescriptors(files.values) },
                     cp.currentBuildFileVersion,
                     skipIfValid = true,
                     indexingConfig.batchSize
