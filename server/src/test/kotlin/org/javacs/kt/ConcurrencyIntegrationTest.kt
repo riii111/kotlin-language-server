@@ -292,4 +292,97 @@ class ConcurrencyIntegrationTest {
         assertThat("No operations should time out", timedOut.get(), `is`(false))
         assertThat("No errors should occur", hasError.get(), `is`(false))
     }
+
+    @Test
+    fun `concurrent workspace changes and isIncluded do not throw`() {
+        val workspaceCount = 10
+        val queryCount = 50
+        val latch = CountDownLatch(workspaceCount + queryCount)
+        val hasError = AtomicBoolean(false)
+
+        val workspaceDirs = (0 until workspaceCount).map {
+            Files.createTempDirectory(tempDir, "workspace$it")
+        }
+
+        repeat(workspaceCount) { i ->
+            executor.submit {
+                try {
+                    sourceFiles.addWorkspaceRoot(workspaceDirs[i])
+                } catch (e: Exception) {
+                    hasError.set(true)
+                    e.printStackTrace()
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+
+        repeat(queryCount) { i ->
+            executor.submit {
+                try {
+                    val testUri = workspaceDirs[i % workspaceCount].resolve("Test.kt").toUri()
+                    sourceFiles.isIncluded(testUri)
+                } catch (e: Exception) {
+                    hasError.set(true)
+                    e.printStackTrace()
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+
+        val completed = latch.await(10, TimeUnit.SECONDS)
+        assertThat("All operations should complete", completed, `is`(true))
+        assertThat("No errors should occur", hasError.get(), `is`(false))
+    }
+
+    @Test
+    fun `concurrent moduleRegistry updates and SourcePath operations do not throw`() {
+        val moduleCount = 10
+        val putCount = 30
+        val latch = CountDownLatch(moduleCount + putCount)
+        val hasError = AtomicBoolean(false)
+
+        val moduleDirs = (0 until moduleCount).map {
+            Files.createTempDirectory(tempDir, "module$it")
+        }
+
+        repeat(moduleCount) { i ->
+            executor.submit {
+                try {
+                    val moduleInfo = org.javacs.kt.classpath.ModuleInfo(
+                        name = "module$i",
+                        rootPath = moduleDirs[i],
+                        sourceDirs = setOf(moduleDirs[i]),
+                        classPath = emptySet()
+                    )
+                    classPath.moduleRegistry.register(moduleInfo)
+                } catch (e: Exception) {
+                    hasError.set(true)
+                    e.printStackTrace()
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+
+        repeat(putCount) { i ->
+            executor.submit {
+                try {
+                    val targetDir = moduleDirs[i % moduleDirs.size]
+                    val uri = targetDir.resolve("File$i.kt").toUri()
+                    sourcePath.put(uri, "fun test$i() {}", null)
+                } catch (e: Exception) {
+                    hasError.set(true)
+                    e.printStackTrace()
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+
+        val completed = latch.await(10, TimeUnit.SECONDS)
+        assertThat("All operations should complete", completed, `is`(true))
+        assertThat("No errors should occur", hasError.get(), `is`(false))
+    }
 }
