@@ -16,10 +16,13 @@ import org.jetbrains.kotlin.resolve.BindingContext
 import org.jetbrains.kotlin.resolve.CompositeBindingContext
 import org.jetbrains.kotlin.resolve.scopes.DescriptorKindFilter
 import kotlin.concurrent.withLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.net.URI
 import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
 class SourcePath(
     private val cp: CompilerClassPath,
@@ -27,6 +30,7 @@ class SourcePath(
     private val indexingConfig: IndexingConfiguration,
     private val databaseService: DatabaseService
 ) {
+    private val filesLock = ReentrantReadWriteLock()
     private val files = mutableMapOf<URI, SourceFile>()
     private val parseDataWriteLock = ReentrantLock()
 
@@ -141,13 +145,23 @@ class SourcePath(
     }
 
     private fun sourceFile(uri: URI): SourceFile {
-        if (uri !in files) {
-            // Fallback solution, usually *all* source files
-            // should be added/opened through SourceFiles
-            LOG.warn("Requested source file {} is not on source path, this is most likely a bug. Adding it now temporarily...", describeURI(uri))
-            put(uri, contentProvider.contentOf(uri), null, temporary = true)
+        filesLock.read {
+            files[uri]?.let { return it }
         }
-        return files[uri]!!
+
+        // I/O must happen outside lock to prevent deadlock with SourceFiles
+        LOG.warn("Requested source file {} is not on source path, adding temporarily...", describeURI(uri))
+        val content = contentProvider.contentOf(uri)
+
+        filesLock.write {
+            files[uri]?.let { return it }
+
+            val path = uri.filePath
+            val moduleId = if (path == null) null else cp.moduleRegistry.findModuleForFile(path)?.name
+            val sourceFile = SourceFile(uri, content, language = null, isTemporary = true, moduleId = moduleId)
+            files[uri] = sourceFile
+            return sourceFile
+        }
     }
 
     fun put(uri: URI, content: String, language: Language?, temporary: Boolean = false) {
@@ -157,16 +171,19 @@ class SourcePath(
             LOG.info("Adding temporary source file {} to source path", describeURI(uri))
         }
 
-        if (uri in files) {
-            sourceFile(uri).put(content)
-        } else {
-            val path = uri.filePath
-            val moduleId = if (temporary || path == null) {
-                null
+        filesLock.write {
+            val existing = files[uri]
+            if (existing != null) {
+                existing.put(content)
             } else {
-                cp.moduleRegistry.findModuleForFile(path)?.name
+                val path = uri.filePath
+                val moduleId = if (temporary || path == null) {
+                    null
+                } else {
+                    cp.moduleRegistry.findModuleForFile(path)?.name
+                }
+                files[uri] = SourceFile(uri, content, language = language, isTemporary = temporary, moduleId = moduleId)
             }
-            files[uri] = SourceFile(uri, content, language = language, isTemporary = temporary, moduleId = moduleId)
         }
     }
 
@@ -180,7 +197,9 @@ class SourcePath(
         }
 
     fun delete(uri: URI) {
-        files[uri]?.let {
+        val sourceFile = filesLock.write { files.remove(uri) }
+
+        sourceFile?.let {
             indexingService.refreshWorkspaceIndexes(
                 { getDeclarationDescriptors(listOf(it)) },
                 { emptySequence() },
@@ -188,8 +207,6 @@ class SourcePath(
             )
             codegenService.removeGeneratedCode(listOfNotNull(it.lastSavedFile), it.moduleId)
         }
-
-        files.remove(uri)
     }
 
     fun content(uri: URI): String = sourceFile(uri).content
@@ -203,7 +220,7 @@ class SourcePath(
             sourceFile(uri).prepareCompiledFile()
 
     fun compileFiles(all: Collection<URI>): BindingContext {
-        val sources = all.map { files[it]!! }
+        val sources = filesLock.read { all.map { files[it]!! } }
         val allChanged = sources.filter { it.content != it.compiledFile?.text }
         val (changedBuildScripts, changedSources) = allChanged.partition { it.kind == CompilationKind.BUILD_SCRIPT }
 
@@ -273,7 +290,8 @@ class SourcePath(
     fun compileAllFiles() {
         // TODO: Investigate the possibility of compiling all files at once, instead of iterating here
         // At the moment, compiling all files at once sometimes leads to an internal error from the TopDownAnalyzer
-        files.keys.forEach {
+        val uris = filesLock.read { files.keys.toList() }
+        uris.forEach {
             // If one of the files fails to compile, we compile the others anyway
             try {
                 compileFiles(listOf(it))
@@ -284,7 +302,8 @@ class SourcePath(
     }
 
     fun save(uri: URI) {
-        files[uri]?.let {
+        val sourceFile = filesLock.read { files[uri] }
+        sourceFile?.let {
             if (!it.isScript) {
                 codegenService.removeGeneratedCode(listOfNotNull(it.lastSavedFile), it.moduleId)
                 it.module?.let { module ->
@@ -298,23 +317,25 @@ class SourcePath(
     }
 
     fun saveAllFiles() {
-        files.keys.forEach { save(it) }
+        val uris = filesLock.read { files.keys.toList() }
+        uris.forEach { save(it) }
     }
 
     fun cleanFiles(uris: Collection<URI>) {
-        uris.forEach { uri ->
-            files[uri]?.clean()
-        }
+        val snapshot = filesLock.read { uris.mapNotNull { files[it] } }
+        snapshot.forEach { it.clean() }
     }
 
     fun cleanAllFiles() {
-        files.values.forEach { it.clean() }
+        val snapshot = filesLock.read { files.values.toList() }
+        snapshot.forEach { it.clean() }
     }
 
     fun refreshDependencyIndexes() {
         compileAllFiles()
 
-        val module = files.values.firstOrNull { it.module != null }?.module
+        val snapshot = filesLock.read { files.values.toList() }
+        val module = snapshot.firstOrNull { it.module != null }?.module
         if (module != null) {
             val diff = cp.lastClassPathDiff
             if (diff != null && diff.hasChanges) {
@@ -322,7 +343,7 @@ class SourcePath(
             } else {
                 indexingService.refreshDependencyIndexes(
                     module,
-                    { getDeclarationDescriptors(files.values) },
+                    { getDeclarationDescriptors(snapshot) },
                     cp.currentBuildFileVersion,
                     skipIfValid = true,
                     indexingConfig.batchSize
@@ -332,7 +353,8 @@ class SourcePath(
     }
 
     fun refreshDependencyIndexesIncrementally(diff: ClassPathDiff) {
-        val module = files.values.firstOrNull { it.module != null }?.module
+        val snapshot = filesLock.read { files.values.toList() }
+        val module = snapshot.firstOrNull { it.module != null }?.module
         indexingService.refreshDependencyIndexesIncrementally(diff, module)
     }
 
@@ -350,16 +372,18 @@ class SourcePath(
         }.asSequence()
 
     fun refresh() {
-        val initialized = files.values.any { it.parsed != null }
+        val snapshot = filesLock.read { files.values.toList() }
+        val initialized = snapshot.any { it.parsed != null }
         if (initialized) {
             LOG.info("Refreshing source path")
-            files.values.forEach { it.clean() }
-            files.values.forEach { it.compile() }
+            snapshot.forEach { it.clean() }
+            snapshot.forEach { it.compile() }
         }
     }
 
     fun refreshModuleAssignments() {
-        for (sourceFile in files.values) {
+        val snapshot = filesLock.read { files.values.toList() }
+        for (sourceFile in snapshot) {
             if (sourceFile.isTemporary) continue
             val path = sourceFile.path ?: continue
             sourceFile.moduleId = cp.moduleRegistry.findModuleForFile(path)?.name
@@ -370,16 +394,20 @@ class SourcePath(
      * Get parsed trees for all .kt files in a specific module.
      * If moduleId is null, returns files not belonging to any module.
      */
-    fun allInModule(moduleId: String?, includeHidden: Boolean = false): Collection<KtFile> =
-            files.values
-                .filter { (includeHidden || !it.isTemporary) && it.moduleId == moduleId }
-                .map { it.apply { parseIfChanged() }.parsed!! }
+    fun allInModule(moduleId: String?, includeHidden: Boolean = false): Collection<KtFile> {
+        val snapshot = filesLock.read {
+            files.values.filter { (includeHidden || !it.isTemporary) && it.moduleId == moduleId }.toList()
+        }
+        return snapshot.map { it.apply { parseIfChanged() }.parsed!! }
+    }
 
     /**
      * Get parsed trees for all .kt files on source path
      */
-    fun all(includeHidden: Boolean = false): Collection<KtFile> =
-            files.values
-                .filter { includeHidden || !it.isTemporary }
-                .map { it.apply { parseIfChanged() }.parsed!! }
+    fun all(includeHidden: Boolean = false): Collection<KtFile> {
+        val snapshot = filesLock.read {
+            files.values.filter { includeHidden || !it.isTemporary }.toList()
+        }
+        return snapshot.map { it.apply { parseIfChanged() }.parsed!! }
+    }
 }
