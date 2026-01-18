@@ -6,6 +6,7 @@ import java.nio.file.Path
 import org.javacs.kt.CompiledFile
 import org.javacs.kt.CompilerClassPath
 import org.javacs.kt.LOG
+import org.javacs.kt.SourcePath
 import org.javacs.kt.ExternalSourcesConfiguration
 import org.javacs.kt.externalsources.ClassContentProvider
 import org.javacs.kt.externalsources.toKlsURI
@@ -19,6 +20,8 @@ import org.javacs.kt.util.parseURI
 import org.jetbrains.kotlin.js.resolve.diagnostics.findPsi
 import org.jetbrains.kotlin.psi.KtNamedDeclaration
 import org.jetbrains.kotlin.descriptors.ConstructorDescriptor
+import org.jetbrains.kotlin.descriptors.DeclarationDescriptor
+import org.jetbrains.kotlin.resolve.descriptorUtil.fqNameSafe
 import java.io.File
 import java.nio.file.Paths
 
@@ -31,7 +34,8 @@ fun goToDefinition(
     classContentProvider: ClassContentProvider,
     tempDir: TemporaryDirectory,
     config: ExternalSourcesConfiguration,
-    cp: CompilerClassPath
+    cp: CompilerClassPath,
+    sp: SourcePath
 ): Location? {
     val (_, target) = file.referenceExpressionAtPoint(cursor) ?: return null
 
@@ -47,6 +51,12 @@ fun goToDefinition(
         val rawClassURI = destination.uri
 
         if (isInsideArchive(rawClassURI, cp)) {
+            val sourceLocation = findSourceInWorkspace(target, sp)
+            if (sourceLocation != null) {
+                LOG.info("Found source in workspace instead of JAR: {}", sourceLocation.uri)
+                return sourceLocation
+            }
+
             parseURI(rawClassURI).toKlsURI()?.let { klsURI ->
                 val (klsSourceURI, content) = classContentProvider.contentOf(klsURI)
 
@@ -89,6 +99,11 @@ fun goToDefinition(
 
     return destination
 }
+
+private fun findSourceInWorkspace(
+    target: DeclarationDescriptor,
+    sp: SourcePath
+): Location? = sp.index.findSourceLocation(target.fqNameSafe)
 
 private fun isInsideArchive(uri: String, cp: CompilerClassPath) =
     uri.contains(".jar!") || uri.contains(".zip!") || cp.javaHome?.let {

@@ -164,7 +164,7 @@ class KotlinTextDocumentService(
 
                 val (file, cursor) = recover(position, Recompile.NEVER)
                     ?: return@submit Either.forLeft(emptyList())
-                val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp)
+                val result = goToDefinition(file, cursor, uriContentProvider.classContentProvider, tempDirectory, config.externalSources, cp, sp)
 
                 cacheManager.putDefinition(uri, line, character, fileVersion, result)
 
