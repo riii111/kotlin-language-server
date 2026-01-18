@@ -62,14 +62,8 @@ class KotlinTextDocumentService(
         get() = sp.beforeCompileCallback
         set(callback) { sp.beforeCompileCallback = callback }
 
-    private val TextDocumentItem.filePath: Path?
-        get() = parseURI(uri).filePath
-
     private val TextDocumentIdentifier.filePath: Path?
         get() = parseURI(uri).filePath
-
-    private val TextDocumentIdentifier.isKotlinScript: Boolean
-        get() = uri.endsWith(".kts")
 
     private val TextDocumentIdentifier.content: String
         get() = sp.content(parseURI(uri))
@@ -373,13 +367,9 @@ class KotlinTextDocumentService(
         }
     }
 
-    private fun shutdownExecutors(awaitTermination: Boolean) {
+    override fun close() {
         executorPool.close()
         diagnosticsManager.close()
-    }
-
-    override fun close() {
-        shutdownExecutors(awaitTermination = true)
     }
 }
 
