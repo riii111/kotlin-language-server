@@ -359,7 +359,7 @@ class KotlinTextDocumentService(
         }
 
         LOG.info("Re-linting {} open files after classpath ready", openFiles.size)
-        // Clean ALL cached parse/compile results since compiler environment has changed
+        cacheManager.clearAll()
         sp.cleanAllFiles()
         diagnosticsManager.debouncer.submitImmediately {
             val context = sp.compileFiles(openFiles)

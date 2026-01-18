@@ -63,4 +63,14 @@ class LspCacheManager {
     fun clearAllReferences() {
         referencesCache.clear()
     }
+
+    /**
+     * Clear all caches. Called when classpath changes or module assignments are updated.
+     */
+    fun clearAll() {
+        definitionCache.clear()
+        hoverCache.clear()
+        completionCache.clear()
+        referencesCache.clear()
+    }
 }
