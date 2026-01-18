@@ -217,7 +217,12 @@ class SourcePath(
                 allInModule(moduleId)
             }
             beforeCompileCallback.invoke()
-            val (context, module) = cp.compiler.compileKtFiles(parse.values, allFiles, kind)
+            val moduleCompiler = if (kind == CompilationKind.BUILD_SCRIPT) {
+                cp.compiler
+            } else {
+                cp.getCompilerForModule(moduleId)
+            }
+            val (context, module) = moduleCompiler.compileKtFiles(parse.values, allFiles, kind)
 
             for ((f, parsed) in parse) {
                 parseDataWriteLock.withLock {
