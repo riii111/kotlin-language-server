@@ -22,9 +22,13 @@ import org.jetbrains.kotlin.js.resolve.diagnostics.findPsi
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.psi.KtImportDirective
 import org.jetbrains.kotlin.psi.KtNamedDeclaration
+import org.jetbrains.kotlin.descriptors.ClassDescriptor
 import org.jetbrains.kotlin.descriptors.ConstructorDescriptor
 import org.jetbrains.kotlin.descriptors.DeclarationDescriptor
+import org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor
+import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinarySourceElement
 import org.jetbrains.kotlin.resolve.descriptorUtil.fqNameSafe
+import org.jetbrains.kotlin.serialization.deserialization.descriptors.DeserializedCallableMemberDescriptor
 import java.io.File
 import java.nio.file.Paths
 
@@ -148,15 +152,11 @@ private fun resolveFromClasspath(
     config: ExternalSourcesConfiguration,
     cp: CompilerClassPath
 ): Location? {
-    // Get the containing class or top-level file class for the descriptor
-    val classDescriptor = findContainingClassDescriptor(target)
-    if (classDescriptor == null) {
-        LOG.debug("Could not find containing class for {}", target.fqNameSafe)
+    val classFilePath = buildClassFilePath(target)
+    if (classFilePath == null) {
+        LOG.debug("Could not determine class file path for {}", target.fqNameSafe)
         return null
     }
-
-    val fqName = classDescriptor.fqNameSafe
-    val classFilePath = fqName.asString().replace('.', '/') + ".class"
 
     LOG.debug("Looking for class file: {}", classFilePath)
 
@@ -178,23 +178,54 @@ private fun resolveFromClasspath(
     return null
 }
 
-private fun findContainingClassDescriptor(descriptor: DeclarationDescriptor): DeclarationDescriptor? {
+private fun buildClassFilePath(descriptor: DeclarationDescriptor): String? {
+    if (descriptor is DeserializedCallableMemberDescriptor) {
+        val source = descriptor.containerSource
+        if (source is KotlinJvmBinarySourceElement) {
+            val classId = source.binaryClass.classId
+            return classId.packageFqName.asString().replace('.', '/') +
+                "/" + classId.relativeClassName.asString().replace('.', '$') + ".class"
+        }
+    }
+
+    val containingClass = findContainingClass(descriptor)
+    if (containingClass != null) {
+        return buildClassFilePathForClass(containingClass)
+    }
+
+    return null
+}
+
+private fun findContainingClass(descriptor: DeclarationDescriptor): ClassDescriptor? {
     var current: DeclarationDescriptor? = descriptor
     while (current != null) {
-        if (current is org.jetbrains.kotlin.descriptors.ClassDescriptor) {
-            return current
-        }
-        // For top-level functions/properties, use the package's file facade
-        if (current is org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor) {
-            // Top-level declarations are in a file facade class
-            // The class name is derived from the file name, e.g., FooKt for Foo.kt
-            // We can't determine the exact file name from the descriptor alone,
-            // but the descriptor's source might contain this info
-            return descriptor // Return the original descriptor; we'll handle this case specially
-        }
+        if (current is ClassDescriptor) return current
+        if (current is PackageFragmentDescriptor) return null
         current = current.containingDeclaration
     }
-    return descriptor
+    return null
+}
+
+private fun buildClassFilePathForClass(classDescriptor: ClassDescriptor): String {
+    val classNames = mutableListOf<String>()
+    var current: DeclarationDescriptor? = classDescriptor
+
+    while (current is ClassDescriptor) {
+        classNames.add(current.name.asString())
+        current = current.containingDeclaration
+    }
+
+    var packagePath = ""
+    var temp: DeclarationDescriptor? = classDescriptor.containingDeclaration
+    while (temp != null && temp !is PackageFragmentDescriptor) {
+        temp = temp.containingDeclaration
+    }
+    if (temp is PackageFragmentDescriptor) {
+        packagePath = temp.fqName.asString().replace('.', '/')
+    }
+
+    val className = classNames.reversed().joinToString("$")
+    return if (packagePath.isEmpty()) "$className.class" else "$packagePath/$className.class"
 }
 
 private fun findDefinitionRange(target: DeclarationDescriptor, content: String): Range {
