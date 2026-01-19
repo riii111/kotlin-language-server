@@ -75,3 +75,17 @@ class GoToDefinitionOfPropertiesTest : SingleFileTestFixture("definition", "GoTo
         assertThat(ranges, hasItem(equalTo(expect)))
     }
 }
+
+class GoToDefinitionCrossFileTest : SingleFileTestFixture("definition/imports", "ImportUser.kt") {
+
+    @Test
+    fun `go to definition on top level function in different file`() {
+        // Line 4: topLevelFunction()
+        // Cursor on "topLevelFunction" (column 12, middle of the word)
+        val definitions = languageServer.textDocumentService.definition(definitionParams(file, 3, 12)).get().left
+        val uris = definitions.map { it.uri }
+
+        assertThat(definitions, hasSize(1))
+        assertThat(uris, hasItem(containsString("SomeClass.kt")))
+    }
+}
