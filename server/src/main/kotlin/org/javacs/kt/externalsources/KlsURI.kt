@@ -32,6 +32,12 @@ fun URI.toKlsURI(): KlsURI? = when (scheme) {
  * which case the file will directly be used without invoking the decompiler.
  */
 data class KlsURI(val fileUri: URI, val query: Map<QueryParam, String>) {
+    companion object {
+        fun fromJarAndClass(jarPath: Path, classFilePath: String): KlsURI? {
+            val uri = URI("kls:${jarPath.toUri()}!/${classFilePath.trimStart('/')}")
+            return KlsURI(parseKlsURIFileURI(uri), emptyMap())
+        }
+    }
     /** Possible KLS URI query parameters. */
     enum class QueryParam(val parameterName: String) {
         SOURCE("source");
