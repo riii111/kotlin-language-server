@@ -31,6 +31,7 @@ import org.jetbrains.kotlin.descriptors.ClassDescriptor
 import org.jetbrains.kotlin.descriptors.ConstructorDescriptor
 import org.jetbrains.kotlin.descriptors.DeclarationDescriptor
 import org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor
+import org.jetbrains.kotlin.descriptors.CallableMemberDescriptor
 import org.jetbrains.kotlin.load.kotlin.KotlinJvmBinarySourceElement
 import org.jetbrains.kotlin.resolve.descriptorUtil.fqNameSafe
 import org.jetbrains.kotlin.serialization.deserialization.descriptors.DeserializedCallableMemberDescriptor
@@ -49,7 +50,6 @@ fun goToDefinition(
     cp: CompilerClassPath,
     sp: SourcePath
 ): Location? {
-    // Handle import statements - referenceExpressionAtPoint returns package, not imported symbol
     file.elementAtPoint(cursor)?.findParent<KtImportDirective>()?.let { importDirective ->
         return resolveImportDefinition(importDirective, file, classContentProvider, tempDir, config, cp, sp)
     }
@@ -67,19 +67,20 @@ fun goToDefinition(
     if (destination != null && !destination.range.isZero) {
         val rawClassURI = destination.uri
 
-        if (isInsideArchive(rawClassURI, cp)) {
+        if (isExternalSource(rawClassURI, cp)) {
             findSourceInWorkspace(target, sp)?.let { return it }
             findSourceInModules(target, cp.moduleRegistry, cp.compiler)?.let { return it }
 
             parseURI(rawClassURI).toKlsURI()?.let { klsURI ->
                 return resolveFromDecompiledSource(klsURI, target, classContentProvider, tempDir, config)
             }
+
+            resolveFromClasspath(target, classContentProvider, tempDir, config, cp)?.let { return it }
         }
 
         return destination
     }
 
-    // DeserializedDescriptor (JAR-derived) has no location or zero range - resolve via classpath lookup
     findSourceInWorkspace(target, sp)?.let { return it }
     findSourceInModules(target, cp.moduleRegistry, cp.compiler)?.let { return it }
     return resolveFromClasspath(target, classContentProvider, tempDir, config, cp)
@@ -97,13 +98,10 @@ private fun resolveImportDefinition(
     val fqName = importDirective.importedFqName ?: return null
     LOG.info("Resolving import: {}", fqName)
 
-    // First try workspace source via symbol index
     sp.index.findSourceLocation(fqName)?.let { return it }
 
-    // Resolve the FQN to a descriptor via module's scope
     val descriptor = resolveImportedDescriptor(fqName, file) ?: return null
 
-    // Try to find source in workspace or other modules
     findSourceInWorkspace(descriptor, sp)?.let { return it }
     findSourceInModules(descriptor, cp.moduleRegistry, cp.compiler)?.let { return it }
 
@@ -115,7 +113,6 @@ private fun resolveImportedDescriptor(fqName: FqName, file: CompiledFile): Decla
     val parentFqName = fqName.parent()
     val shortName = fqName.shortName()
 
-    // Try to find in package scope
     val packageView = module.getPackage(parentFqName)
     val candidates = packageView.memberScope.getContributedDescriptors { it == shortName }
         .filter { it.name == shortName }
@@ -159,33 +156,42 @@ private fun resolveFromClasspath(
     config: ExternalSourcesConfiguration,
     cp: CompilerClassPath
 ): Location? {
-    val classFilePath = buildClassFilePath(target)
-    if (classFilePath == null) {
-        LOG.debug("Could not determine class file path for {}", target.fqNameSafe)
-        return null
-    }
+    val classFilePath = buildClassFilePath(target) ?: return null
 
-    LOG.debug("Looking for class file: {}", classFilePath)
-
-    // Search in classpath for the class file
     for (entry in cp.classPath) {
         val jarPath = entry.compiledJar
         if (!jarPath.toFile().exists()) continue
 
         try {
             val klsURI = KlsURI.fromJarAndClass(jarPath, classFilePath) ?: continue
-            LOG.debug("Found class in JAR: {}", klsURI)
             return resolveFromDecompiledSource(klsURI, target, classContentProvider, tempDir, config)
         } catch (e: Exception) {
             LOG.debug("Failed to resolve from {}: {}", jarPath, e.message)
         }
     }
 
-    LOG.debug("Could not find class file {} in classpath", classFilePath)
     return null
 }
 
 private fun buildClassFilePath(descriptor: DeclarationDescriptor): String? {
+    if (descriptor is CallableMemberDescriptor) {
+        val originalDescriptor = findOriginalDeclaration(descriptor)
+
+        if (originalDescriptor is DeserializedCallableMemberDescriptor) {
+            val source = originalDescriptor.containerSource
+            if (source is KotlinJvmBinarySourceElement) {
+                val classId = source.binaryClass.classId
+                return classId.packageFqName.asString().replace('.', '/') +
+                    "/" + classId.relativeClassName.asString().replace('.', '$') + ".class"
+            }
+        }
+
+        val containingClass = findContainingClass(originalDescriptor)
+        if (containingClass != null) {
+            return buildClassFilePathForClass(containingClass)
+        }
+    }
+
     if (descriptor is DeserializedCallableMemberDescriptor) {
         val source = descriptor.containerSource
         if (source is KotlinJvmBinarySourceElement) {
@@ -201,6 +207,15 @@ private fun buildClassFilePath(descriptor: DeclarationDescriptor): String? {
     }
 
     return null
+}
+
+private fun findOriginalDeclaration(descriptor: CallableMemberDescriptor): CallableMemberDescriptor {
+    var current = descriptor
+    while (current.kind == CallableMemberDescriptor.Kind.FAKE_OVERRIDE) {
+        val overridden = current.overriddenDescriptors.firstOrNull() ?: break
+        current = overridden
+    }
+    return current
 }
 
 private fun findContainingClass(descriptor: DeclarationDescriptor): ClassDescriptor? {
@@ -252,13 +267,59 @@ private fun findSourceInWorkspace(
     sp: SourcePath
 ): Location? = sp.index.findSourceLocation(target.fqNameSafe)
 
-private fun isInsideArchive(uri: String, cp: CompilerClassPath) =
-    uri.contains(".jar!") || uri.contains(".zip!") || cp.javaHome?.let {
-        Paths.get(parseURI(uri)).toString().startsWith(File(it).path)
-    } ?: false
+private fun isExternalSource(uri: String, cp: CompilerClassPath): Boolean {
+    if (uri.contains(".jar!") || uri.contains(".zip!")) {
+        return true
+    }
 
-// SymbolIndex is per-module, so cross-module symbols aren't indexed.
-// This searches all modules' source directories directly using FQN-based path resolution.
+    val path = try {
+        Paths.get(parseURI(uri)).normalize().toAbsolutePath()
+    } catch (e: Exception) {
+        LOG.debug("Failed to parse URI {}, treating as external source: {}", uri, e.message)
+        return true
+    }
+
+    cp.javaHome?.let { javaHome ->
+        val javaHomePath = Paths.get(javaHome).normalize().toAbsolutePath()
+        if (path.startsWith(javaHomePath)) {
+            return true
+        }
+    }
+
+    val gradleCacheDirs = listOfNotNull(
+        System.getenv("GRADLE_USER_HOME")?.let { Paths.get(it, "caches") },
+        Paths.get(System.getProperty("user.home"), ".gradle", "caches")
+    ).map { it.normalize().toAbsolutePath() }
+
+    if (gradleCacheDirs.any { cacheDir -> path.startsWith(cacheDir) }) {
+        return true
+    }
+
+    val mavenRepoDirs = listOfNotNull(
+        System.getenv("M2_HOME")?.let { Paths.get(it, "repository") },
+        Paths.get(System.getProperty("user.home"), ".m2", "repository")
+    ).map { it.normalize().toAbsolutePath() }
+
+    if (mavenRepoDirs.any { repoDir -> path.startsWith(repoDir) }) {
+        return true
+    }
+
+    val workspaceRoots = cp.workspaceRoots
+    if (workspaceRoots.isNotEmpty()) {
+        val isInsideWorkspace = workspaceRoots.any { root ->
+            path.startsWith(root.normalize().toAbsolutePath())
+        }
+        if (!isInsideWorkspace) {
+            LOG.debug("Path {} is outside workspace roots, treating as external source", path)
+            return true
+        }
+    } else {
+        LOG.debug("No workspace roots available, cannot determine if {} is external", path)
+    }
+
+    return false
+}
+
 private fun findSourceInModules(
     target: DeclarationDescriptor,
     moduleRegistry: ModuleRegistry,
@@ -356,7 +417,6 @@ private fun searchInFile(
     return null
 }
 
-// Traverse declarations following the path (e.g., ["MyClass", "InnerClass", "method"])
 private fun findDeclarationByPath(
     declarations: List<KtDeclaration>,
     path: List<String>
@@ -374,7 +434,6 @@ private fun findDeclarationByPath(
             return declaration
         }
 
-        // Continue traversing into nested declarations
         if (declaration is KtClassOrObject) {
             val nested = findDeclarationByPath(declaration.declarations, remainingPath)
             if (nested != null) return nested
