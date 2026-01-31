@@ -320,7 +320,7 @@ private fun searchInDirectory(
 ): Location? {
     val ktFiles = packageDir.toFile().listFiles { file ->
         file.isFile && file.extension == "kt"
-    } ?: return null
+    }?.sortedBy { it.name } ?: return null
 
     for (file in ktFiles) {
         try {
