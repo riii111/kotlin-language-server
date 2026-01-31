@@ -14,12 +14,17 @@ import org.javacs.kt.externalsources.KlsURI
 import org.javacs.kt.position.location
 import org.javacs.kt.position.isZero
 import org.javacs.kt.position.position
+import org.javacs.kt.classpath.ModuleRegistry
+import org.javacs.kt.compiler.Compiler
 import org.javacs.kt.util.partitionAroundLast
 import org.javacs.kt.util.TemporaryDirectory
 import org.javacs.kt.util.parseURI
 import org.javacs.kt.util.findParent
 import org.jetbrains.kotlin.js.resolve.diagnostics.findPsi
 import org.jetbrains.kotlin.name.FqName
+import org.jetbrains.kotlin.psi.KtClassOrObject
+import org.jetbrains.kotlin.psi.KtDeclaration
+import org.jetbrains.kotlin.psi.KtFile
 import org.jetbrains.kotlin.psi.KtImportDirective
 import org.jetbrains.kotlin.psi.KtNamedDeclaration
 import org.jetbrains.kotlin.descriptors.ClassDescriptor
@@ -64,6 +69,7 @@ fun goToDefinition(
 
         if (isInsideArchive(rawClassURI, cp)) {
             findSourceInWorkspace(target, sp)?.let { return it }
+            findSourceInModules(target, cp.moduleRegistry, cp.compiler)?.let { return it }
 
             parseURI(rawClassURI).toKlsURI()?.let { klsURI ->
                 return resolveFromDecompiledSource(klsURI, target, classContentProvider, tempDir, config)
@@ -75,6 +81,7 @@ fun goToDefinition(
 
     // DeserializedDescriptor (JAR-derived) has no location or zero range - resolve via classpath lookup
     findSourceInWorkspace(target, sp)?.let { return it }
+    findSourceInModules(target, cp.moduleRegistry, cp.compiler)?.let { return it }
     return resolveFromClasspath(target, classContentProvider, tempDir, config, cp)
 }
 
@@ -96,10 +103,10 @@ private fun resolveImportDefinition(
     // Resolve the FQN to a descriptor via module's scope
     val descriptor = resolveImportedDescriptor(fqName, file) ?: return null
 
-    // Try to find source in workspace
+    // Try to find source in workspace or other modules
     findSourceInWorkspace(descriptor, sp)?.let { return it }
+    findSourceInModules(descriptor, cp.moduleRegistry, cp.compiler)?.let { return it }
 
-    // Fall back to JAR decompilation
     return resolveFromClasspath(descriptor, classContentProvider, tempDir, config, cp)
 }
 
@@ -249,3 +256,129 @@ private fun isInsideArchive(uri: String, cp: CompilerClassPath) =
     uri.contains(".jar!") || uri.contains(".zip!") || cp.javaHome?.let {
         Paths.get(parseURI(uri)).toString().startsWith(File(it).path)
     } ?: false
+
+// SymbolIndex is per-module, so cross-module symbols aren't indexed.
+// This searches all modules' source directories directly using FQN-based path resolution.
+private fun findSourceInModules(
+    target: DeclarationDescriptor,
+    moduleRegistry: ModuleRegistry,
+    compiler: Compiler
+): Location? {
+    if (moduleRegistry.isEmpty()) {
+        return null
+    }
+
+    val fqName = target.fqNameSafe
+    val packageFqName = getPackageFqName(target)
+    val packagePath = packageFqName.asString().replace('.', File.separatorChar)
+    val declarationPath = getDeclarationPath(fqName, packageFqName)
+
+    LOG.debug("Searching for {} in modules (package: {}, path: {})", fqName, packageFqName, declarationPath)
+
+    for (module in moduleRegistry.allModules()) {
+        for (sourceDir in module.sourceDirs) {
+            val packageDir = if (packagePath.isEmpty()) sourceDir else sourceDir.resolve(packagePath)
+            if (!packageDir.toFile().exists() || !packageDir.toFile().isDirectory) {
+                continue
+            }
+
+            val location = searchInDirectory(packageDir, packageFqName, declarationPath, compiler)
+            if (location != null) {
+                LOG.info("Found {} in module '{}' at {}", fqName, module.name, location.uri)
+                return location
+            }
+        }
+    }
+
+    LOG.debug("Could not find {} in any module source directory", fqName)
+    return null
+}
+
+private fun getPackageFqName(descriptor: DeclarationDescriptor): FqName {
+    var current: DeclarationDescriptor? = descriptor
+    while (current != null) {
+        if (current is PackageFragmentDescriptor) {
+            return current.fqName
+        }
+        current = current.containingDeclaration
+    }
+    return FqName.ROOT
+}
+
+private fun getDeclarationPath(fqName: FqName, packageFqName: FqName): List<String> {
+    val fqNameStr = fqName.asString()
+    val packageStr = packageFqName.asString()
+    val relativePath = if (packageStr.isEmpty()) fqNameStr else fqNameStr.removePrefix("$packageStr.")
+    return relativePath.split('.')
+}
+
+private fun searchInDirectory(
+    packageDir: Path,
+    packageFqName: FqName,
+    declarationPath: List<String>,
+    compiler: Compiler
+): Location? {
+    val ktFiles = packageDir.toFile().listFiles { file ->
+        file.isFile && file.extension == "kt"
+    }?.sortedBy { it.name } ?: return null
+
+    for (file in ktFiles) {
+        try {
+            val location = searchInFile(file.toPath(), packageFqName, declarationPath, compiler)
+            if (location != null) {
+                return location
+            }
+        } catch (e: Exception) {
+            LOG.debug("Error parsing {}: {}", file, e.message)
+        }
+    }
+    return null
+}
+
+private fun searchInFile(
+    filePath: Path,
+    packageFqName: FqName,
+    declarationPath: List<String>,
+    compiler: Compiler
+): Location? {
+    val content = filePath.toFile().readText()
+    val ktFile = compiler.createKtFile(content, filePath)
+
+    if (ktFile.packageFqName != packageFqName) {
+        return null
+    }
+
+    val declaration = findDeclarationByPath(ktFile.declarations, declarationPath)
+    if (declaration != null) {
+        val nameIdentifier = (declaration as? KtNamedDeclaration)?.nameIdentifier ?: declaration
+        return location(nameIdentifier)
+    }
+    return null
+}
+
+// Traverse declarations following the path (e.g., ["MyClass", "InnerClass", "method"])
+private fun findDeclarationByPath(
+    declarations: List<KtDeclaration>,
+    path: List<String>
+): KtDeclaration? {
+    if (path.isEmpty()) return null
+
+    val targetName = path.first()
+    val remainingPath = path.drop(1)
+
+    for (declaration in declarations) {
+        val name = (declaration as? KtNamedDeclaration)?.name ?: continue
+        if (name != targetName) continue
+
+        if (remainingPath.isEmpty()) {
+            return declaration
+        }
+
+        // Continue traversing into nested declarations
+        if (declaration is KtClassOrObject) {
+            val nested = findDeclarationByPath(declaration.declarations, remainingPath)
+            if (nested != null) return nested
+        }
+    }
+    return null
+}

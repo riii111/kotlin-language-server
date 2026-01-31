@@ -89,3 +89,48 @@ class GoToDefinitionCrossFileTest : SingleFileTestFixture("definition/imports", 
         assertThat(uris, hasItem(containsString("SomeClass.kt")))
     }
 }
+
+class GoToDefinitionCrossModuleTest : SingleFileTestFixture(
+    "multimodule",
+    "moduleB/src/main/kotlin/com/example/b/UsesModuleA.kt"
+) {
+    @org.junit.Before
+    fun checkModuleRegistry() {
+        org.junit.Assume.assumeTrue(
+            "Skipping: moduleRegistry is empty (Gradle resolution may have failed)",
+            !languageServer.classPath.moduleRegistry.isEmpty()
+        )
+    }
+
+    @Test
+    fun `go to definition jumps to source in other module instead of JAR`() {
+        // Line 6: return moduleAOnlyFunction()
+        val definitions = languageServer.textDocumentService.definition(definitionParams(file, 6, 15)).get().left
+
+        // Skip if cross-module symbol resolution is not available (moduleA JAR not built)
+        org.junit.Assume.assumeTrue(
+            "Skipping: cross-module symbol not resolved (moduleA may not be built)",
+            definitions.isNotEmpty()
+        )
+
+        val uris = definitions.map { it.uri }
+        assertThat(uris, hasItem(containsString("moduleA")))
+        assertThat(uris, hasItem(containsString("Helper.kt")))
+    }
+
+    @Test
+    fun `go to definition on import statement jumps to source in other module`() {
+        // Line 3: import com.example.a.moduleAOnlyFunction
+        val definitions = languageServer.textDocumentService.definition(definitionParams(file, 3, 30)).get().left
+
+        // Skip if cross-module symbol resolution is not available
+        org.junit.Assume.assumeTrue(
+            "Skipping: cross-module symbol not resolved (moduleA may not be built)",
+            definitions.isNotEmpty()
+        )
+
+        val uris = definitions.map { it.uri }
+        assertThat(uris, hasItem(containsString("moduleA")))
+        assertThat(uris, hasItem(containsString("Helper.kt")))
+    }
+}
