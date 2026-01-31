@@ -192,15 +192,6 @@ private fun buildClassFilePath(descriptor: DeclarationDescriptor): String? {
         }
     }
 
-    if (descriptor is DeserializedCallableMemberDescriptor) {
-        val source = descriptor.containerSource
-        if (source is KotlinJvmBinarySourceElement) {
-            val classId = source.binaryClass.classId
-            return classId.packageFqName.asString().replace('.', '/') +
-                "/" + classId.relativeClassName.asString().replace('.', '$') + ".class"
-        }
-    }
-
     val containingClass = findContainingClass(descriptor)
     if (containingClass != null) {
         return buildClassFilePathForClass(containingClass)
