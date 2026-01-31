@@ -27,8 +27,6 @@ import org.jetbrains.kotlin.psi.KtDeclaration
 import org.jetbrains.kotlin.psi.KtFile
 import org.jetbrains.kotlin.psi.KtImportDirective
 import org.jetbrains.kotlin.psi.KtNamedDeclaration
-import org.jetbrains.kotlin.psi.KtNamedFunction
-import org.jetbrains.kotlin.psi.KtProperty
 import org.jetbrains.kotlin.descriptors.ClassDescriptor
 import org.jetbrains.kotlin.descriptors.ConstructorDescriptor
 import org.jetbrains.kotlin.descriptors.DeclarationDescriptor
@@ -271,19 +269,20 @@ private fun findSourceInModules(
     }
 
     val fqName = target.fqNameSafe
-    val packagePath = fqName.parent().asString().replace('.', File.separatorChar)
-    val targetName = fqName.shortName().asString()
+    val packageFqName = getPackageFqName(target)
+    val packagePath = packageFqName.asString().replace('.', File.separatorChar)
+    val declarationPath = getDeclarationPath(fqName, packageFqName)
 
-    LOG.debug("Searching for {} in modules (package path: {})", fqName, packagePath)
+    LOG.debug("Searching for {} in modules (package: {}, path: {})", fqName, packageFqName, declarationPath)
 
     for (module in moduleRegistry.allModules()) {
         for (sourceDir in module.sourceDirs) {
-            val packageDir = sourceDir.resolve(packagePath)
+            val packageDir = if (packagePath.isEmpty()) sourceDir else sourceDir.resolve(packagePath)
             if (!packageDir.toFile().exists() || !packageDir.toFile().isDirectory) {
                 continue
             }
 
-            val location = searchInDirectory(packageDir, fqName, targetName, compiler)
+            val location = searchInDirectory(packageDir, packageFqName, declarationPath, compiler)
             if (location != null) {
                 LOG.info("Found {} in module '{}' at {}", fqName, module.name, location.uri)
                 return location
@@ -295,10 +294,28 @@ private fun findSourceInModules(
     return null
 }
 
+private fun getPackageFqName(descriptor: DeclarationDescriptor): FqName {
+    var current: DeclarationDescriptor? = descriptor
+    while (current != null) {
+        if (current is PackageFragmentDescriptor) {
+            return current.fqName
+        }
+        current = current.containingDeclaration
+    }
+    return FqName.ROOT
+}
+
+private fun getDeclarationPath(fqName: FqName, packageFqName: FqName): List<String> {
+    val fqNameStr = fqName.asString()
+    val packageStr = packageFqName.asString()
+    val relativePath = if (packageStr.isEmpty()) fqNameStr else fqNameStr.removePrefix("$packageStr.")
+    return relativePath.split('.')
+}
+
 private fun searchInDirectory(
     packageDir: Path,
-    fqName: FqName,
-    targetName: String,
+    packageFqName: FqName,
+    declarationPath: List<String>,
     compiler: Compiler
 ): Location? {
     val ktFiles = packageDir.toFile().listFiles { file ->
@@ -307,7 +324,7 @@ private fun searchInDirectory(
 
     for (file in ktFiles) {
         try {
-            val location = searchInFile(file.toPath(), fqName, targetName, compiler)
+            val location = searchInFile(file.toPath(), packageFqName, declarationPath, compiler)
             if (location != null) {
                 return location
             }
@@ -320,14 +337,18 @@ private fun searchInDirectory(
 
 private fun searchInFile(
     filePath: Path,
-    fqName: FqName,
-    targetName: String,
+    packageFqName: FqName,
+    declarationPath: List<String>,
     compiler: Compiler
 ): Location? {
     val content = filePath.toFile().readText()
     val ktFile = compiler.createKtFile(content, filePath)
 
-    val declaration = findDeclarationByFqName(ktFile, fqName, targetName)
+    if (ktFile.packageFqName != packageFqName) {
+        return null
+    }
+
+    val declaration = findDeclarationByPath(ktFile.declarations, declarationPath)
     if (declaration != null) {
         val nameIdentifier = (declaration as? KtNamedDeclaration)?.nameIdentifier ?: declaration
         return location(nameIdentifier)
@@ -335,55 +356,28 @@ private fun searchInFile(
     return null
 }
 
-private fun findDeclarationByFqName(
-    ktFile: KtFile,
-    fqName: FqName,
-    targetName: String
+// Traverse declarations following the path (e.g., ["MyClass", "InnerClass", "method"])
+private fun findDeclarationByPath(
+    declarations: List<KtDeclaration>,
+    path: List<String>
 ): KtDeclaration? {
-    val filePackage = ktFile.packageFqName
+    if (path.isEmpty()) return null
 
-    // Check if this file's package matches the target's package
-    if (filePackage != fqName.parent()) {
-        return null
-    }
+    val targetName = path.first()
+    val remainingPath = path.drop(1)
 
-    // Search top-level declarations
-    for (declaration in ktFile.declarations) {
-        val found = findInDeclaration(declaration, targetName, fqName)
-        if (found != null) {
-            return found
-        }
-    }
-    return null
-}
+    for (declaration in declarations) {
+        val name = (declaration as? KtNamedDeclaration)?.name ?: continue
+        if (name != targetName) continue
 
-private fun findInDeclaration(
-    declaration: KtDeclaration,
-    targetName: String,
-    fqName: FqName
-): KtDeclaration? {
-    when (declaration) {
-        is KtNamedFunction -> {
-            if (declaration.name == targetName) {
-                return declaration
-            }
+        if (remainingPath.isEmpty()) {
+            return declaration
         }
-        is KtProperty -> {
-            if (declaration.name == targetName) {
-                return declaration
-            }
-        }
-        is KtClassOrObject -> {
-            if (declaration.name == targetName) {
-                return declaration
-            }
-            // Search nested declarations
-            for (nested in declaration.declarations) {
-                val found = findInDeclaration(nested, targetName, fqName)
-                if (found != null) {
-                    return found
-                }
-            }
+
+        // Continue traversing into nested declarations
+        if (declaration is KtClassOrObject) {
+            val nested = findDeclarationByPath(declaration.declarations, remainingPath)
+            if (nested != null) return nested
         }
     }
     return null
